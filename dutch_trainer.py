@@ -45,11 +45,15 @@ def configured() -> bool:
 
 
 def headers(prefer: str | None = None) -> dict[str, str]:
+    # Supabase's newer sb_secret_/sb_publishable_ keys are API keys, not JWTs.
+    # They belong in the apikey header only. Legacy service_role/anon JWT keys
+    # (typically starting with eyJ...) may also be sent as Bearer tokens.
     h = {
         "apikey": SUPA_KEY,
-        "Authorization": f"Bearer {SUPA_KEY}",
         "Content-Type": "application/json",
     }
+    if SUPA_KEY and not SUPA_KEY.startswith(("sb_secret_", "sb_publishable_")):
+        h["Authorization"] = f"Bearer {SUPA_KEY}"
     if prefer:
         h["Prefer"] = prefer
     return h
@@ -474,6 +478,19 @@ require_password()
 
 if not configured():
     st.error("Supabase is not configured yet. Add SUPABASE_URL and SUPABASE_SERVICE_KEY to Streamlit secrets.")
+    st.stop()
+
+# Fail early with a useful, non-secret diagnostic instead of a redacted traceback.
+try:
+    supa_get("trainer_items", {"select": "id", "limit": "1"})
+except requests.HTTPError as exc:
+    status = exc.response.status_code if exc.response is not None else "unknown"
+    if status == 401:
+        st.error("Supabase rejected the API key (HTTP 401). Check SUPABASE_SERVICE_KEY in Streamlit Secrets, then save and reboot the app.")
+    elif status == 404:
+        st.error("Supabase connected, but trainer_items was not found (HTTP 404). The trainer schema may not have been created in this project.")
+    else:
+        st.error(f"Supabase connection failed (HTTP {status}). Open Manage app → Logs for details.")
     st.stop()
 
 pages = st.tabs(["Practice", "Generate", "Add", "Library", "Progress"])
