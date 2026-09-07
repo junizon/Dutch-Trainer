@@ -277,10 +277,17 @@ def schedule_after(progress: dict[str, Any], grade: str) -> tuple[dict[str, Any]
     return values, before
 
 
-def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> None:
+def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> bool:
+    """Save one review. Return True when the item is automatically retired."""
     progress = ensure_progress(str(item["id"]))
     values, before = schedule_after(progress, grade)
     after = int(values["interval_days"])
+
+    # A fully correct answer retires the item immediately. The review history
+    # remains permanent, and the item can still be reactivated from Library.
+    retired = grade == "correct"
+    if retired:
+        values["status"] = "mastered"
 
     # PostgREST cannot interpret now() as SQL inside JSON, so omit the field and
     # let updated_at remain server-side; reviewed_at is defaulted in reviews.
@@ -298,7 +305,10 @@ def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> N
             "interval_after": after,
         }],
     )
+    if retired:
+        supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": False})
     fetch_activity_dates.clear()
+    return retired
 
 
 def practice_candidates(limit: int = 40) -> list[dict[str, Any]]:
@@ -747,17 +757,24 @@ with pages[0]:
 
         if submit or dont:
             grade = "dont_know" if dont else classify_answer(item, typed)
-            save_review(item, typed, grade, cue)
+            retired = save_review(item, typed, grade, cue)
             st.session_state.practice_feedback = {
                 "grade": grade,
                 "typed": typed,
                 "correct": item.get("dutch", ""),
+                "retired": retired,
             }
             # Real mistakes return later in the same session after a few cards.
             if grade in {"wrong", "dont_know"}:
                 insert_at = min(len(queue), idx + 4)
                 queue.insert(insert_at, item)
-                st.session_state.practice_queue = queue
+            elif retired:
+                # If this item had been requeued after an earlier miss, remove
+                # those future copies now that it has been answered correctly.
+                queue = queue[:idx + 1] + [
+                    q for q in queue[idx + 1:] if str(q.get("id")) != str(item.get("id"))
+                ]
+            st.session_state.practice_queue = queue
             st.rerun()
 
         fb = st.session_state.practice_feedback
@@ -769,6 +786,8 @@ with pages[0]:
                 "dont_know": "🌱 Marked as not known yet",
             }
             st.write(labels.get(fb["grade"], fb["grade"]))
+            if fb.get("retired"):
+                st.caption("🏁 Correct — automatically retired from future practice.")
             st.markdown(f"**Dutch:** {html.escape(str(item.get('dutch','')))}")
             if item.get("example_nl"):
                 st.caption(str(item.get("example_nl")))
@@ -864,60 +883,116 @@ with pages[2]:
 # Library ---------------------------------------------------------------------
 with pages[3]:
     st.subheader("Library")
+    st.caption("Correct items retire automatically. Search or reopen retired material whenever you want.")
     try:
-        items = fetch_items()
+        items = fetch_items(include_inactive=True)
     except Exception as e:
         st.error(f"Could not load library: {e}")
         items = []
 
-    search = st.text_input("Search Dutch / English", key="library_search")
-    typ = st.selectbox("Show", ["all", "word", "phrase", "sentence"], key="library_type")
+    f1, f2 = st.columns([2, 1])
+    search = f1.text_input("Search Dutch / English", key="library_search")
+    state_view = f2.selectbox("Status", ["Active", "Retired", "All"], key="library_status")
+
+    f3, f4 = st.columns(2)
+    typ = f3.selectbox("Type", ["all", "word", "phrase", "sentence"], key="library_type")
+    level_view = f4.selectbox("Level", ["all", "A2", "B1", "B2"], key="library_level")
+
     filtered = []
     q = search.strip().lower()
     for item in items:
+        active = bool(item.get("active", True))
+        if state_view == "Active" and not active:
+            continue
+        if state_view == "Retired" and active:
+            continue
         if typ != "all" and item.get("item_type") != typ:
+            continue
+        if level_view != "all" and item.get("level") != level_view:
             continue
         hay = f"{item.get('dutch','')} {item.get('english','')} {item.get('theme','')}".lower()
         if q and q not in hay:
             continue
         filtered.append(item)
 
-    st.caption(f"{len(filtered)} of {len(items)} active items")
-    for item in filtered[:200]:
-        with st.expander(f"{item.get('dutch','')} — {item.get('english','')}"):
+    active_n = sum(1 for x in items if x.get("active", True))
+    retired_n = len(items) - active_n
+    st.caption(
+        f"{len(filtered)} shown · {active_n} active · {retired_n} retired · {len(items)} total"
+    )
+
+    # Keep very large libraries usable instead of rendering hundreds of expanders.
+    PAGE_SIZE = 25
+    pages_n = max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = st.selectbox(
+        "Page",
+        list(range(1, pages_n + 1)),
+        index=0,
+        key=f"library_page_{state_view}_{typ}_{level_view}_{q}",
+    )
+    lo = (int(page) - 1) * PAGE_SIZE
+    hi = lo + PAGE_SIZE
+
+    if not filtered:
+        st.info("No items match these filters.")
+
+    for item in filtered[lo:hi]:
+        active = bool(item.get("active", True))
+        status_label = "active" if active else "retired"
+        with st.expander(f"{item.get('dutch','')} — {item.get('english','')} · {status_label}"):
             st.write(f"Type: {item.get('item_type')} · Level: {item.get('level')} · Theme: {item.get('theme')}")
             if item.get("example_nl"):
                 st.write(item["example_nl"])
             pronunciation_box(str(item.get("dutch", "")), f"lib-{item['id']}")
-            if st.button("Archive", key=f"archive_{item['id']}"):
-                try:
-                    supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": False})
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not archive: {e}")
+            if active:
+                if st.button("Retire now", key=f"archive_{item['id']}"):
+                    try:
+                        supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": False})
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not retire: {e}")
+            else:
+                if st.button("Reactivate for practice", key=f"reactivate_{item['id']}"):
+                    try:
+                        supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": True})
+                        # Bring it back immediately rather than waiting for an old due date.
+                        supa_patch(
+                            "trainer_progress",
+                            {"item_id": f"eq.{item['id']}"},
+                            {"status": "learning", "due_on": date.today().isoformat()},
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not reactivate: {e}")
 
 
 # Progress --------------------------------------------------------------------
 with pages[4]:
     st.subheader("Progress")
     try:
-        items = fetch_items()
+        items = fetch_items(include_inactive=True)
         prog = fetch_progress()
         reviews = supa_get("trainer_reviews", {"select": "id,grade,reviewed_at", "order": "reviewed_at.desc", "limit": "5000"})
     except Exception as e:
         st.error(f"Could not load progress: {e}")
         items, prog, reviews = [], {}, []
 
-    counts = {"new": 0, "learning": 0, "familiar": 0, "mastered": 0}
+    counts = {"new": 0, "learning": 0, "familiar": 0}
     due = 0
+    retired = 0
     today = date.today().isoformat()
     for item in items:
+        if not item.get("active", True):
+            retired += 1
+            continue
         p = prog.get(str(item["id"]))
         if not p:
             counts["new"] += 1
             due += 1
             continue
         status = p.get("status", "new")
+        if status == "mastered":
+            status = "familiar"
         counts[status] = counts.get(status, 0) + 1
         if str(p.get("due_on") or today) <= today:
             due += 1
@@ -926,7 +1001,7 @@ with pages[4]:
     cols[0].metric("New", counts["new"])
     cols[1].metric("Learning", counts["learning"])
     cols[2].metric("Familiar", counts["familiar"])
-    cols[3].metric("Mastered", counts["mastered"])
+    cols[3].metric("Retired", retired)
     st.metric("Due now", due)
 
     if reviews:
