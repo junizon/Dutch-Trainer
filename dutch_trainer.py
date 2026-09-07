@@ -5,9 +5,10 @@ import html
 import json
 import random
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import requests
@@ -38,6 +39,8 @@ SUPA_URL = secret("SUPABASE_URL").rstrip("/")
 SUPA_KEY = secret("SUPABASE_SERVICE_KEY") or secret("SUPABASE_KEY")
 OPENAI_KEY = secret("OPENAI_API_KEY")
 OPENAI_MODEL = secret("OPENAI_MODEL", "gpt-5.6-luna")
+TRAINER_TIMEZONE = secret("TRAINER_TIMEZONE", "Europe/Amsterdam")
+REST_DAYS_ALLOWED = 2  # same forgiving rule as Napraten: up to 2 consecutive rest days
 
 
 def configured() -> bool:
@@ -97,6 +100,36 @@ def supa_patch(table: str, filters: dict[str, str], values: dict[str, Any]) -> N
         timeout=12,
     )
     r.raise_for_status()
+
+
+def supa_get_paged(
+    table: str,
+    params: dict[str, str] | None = None,
+    page_size: int = 1000,
+    max_pages: int = 100,
+) -> list[dict[str, Any]]:
+    """Fetch rows in pages so streak history is not truncated at Supabase's row cap."""
+    out: list[dict[str, Any]] = []
+    base = dict(params or {})
+    for page in range(max_pages):
+        start = page * page_size
+        stop = start + page_size - 1
+        h = headers()
+        h["Range"] = f"{start}-{stop}"
+        r = requests.get(
+            f"{SUPA_URL}/rest/v1/{table}",
+            params=base,
+            headers=h,
+            timeout=12,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            break
+        out.extend(data)
+        if len(data) < page_size:
+            break
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -265,6 +298,7 @@ def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> N
             "interval_after": after,
         }],
     )
+    fetch_activity_dates.clear()
 
 
 def practice_candidates(limit: int = 40) -> list[dict[str, Any]]:
@@ -290,6 +324,174 @@ def practice_candidates(limit: int = 40) -> list[dict[str, Any]]:
     if len(due_items) > limit:
         due_items = due_items[:limit]
     return due_items
+
+
+# -----------------------------------------------------------------------------
+# Streak helpers
+# -----------------------------------------------------------------------------
+
+
+def _trainer_tz() -> ZoneInfo:
+    try:
+        return ZoneInfo(TRAINER_TIMEZONE)
+    except Exception:
+        return ZoneInfo("Europe/Amsterdam")
+
+
+def local_today() -> date:
+    return datetime.now(_trainer_tz()).date()
+
+
+def _review_local_date(value: str) -> date | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(_trainer_tz()).date()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_activity_dates() -> list[date]:
+    rows = supa_get_paged(
+        "trainer_reviews",
+        {"select": "reviewed_at", "order": "reviewed_at.asc"},
+    )
+    dates = {_review_local_date(str(r.get("reviewed_at") or "")) for r in rows}
+    return sorted(d for d in dates if d is not None)
+
+
+def streak_summary(activity_dates: list[date]) -> dict[str, Any]:
+    today = local_today()
+    dates = sorted(set(d for d in activity_dates if d <= today))
+    if not dates:
+        return {
+            "current": 0,
+            "best": 0,
+            "today_done": False,
+            "gap": None,
+            "rest_days_current": 0,
+            "last7": [],
+            "message": "🌱 Practice one item today and your streak begins!",
+        }
+
+    allowed_gap = REST_DAYS_ALLOWED + 1
+    clusters: list[list[date]] = []
+    cluster = [dates[0]]
+    for d in dates[1:]:
+        if (d - cluster[-1]).days <= allowed_gap:
+            cluster.append(d)
+        else:
+            clusters.append(cluster)
+            cluster = [d]
+    clusters.append(cluster)
+
+    historical_best = max((c[-1] - c[0]).days + 1 for c in clusters)
+    last = dates[-1]
+    gap = (today - last).days
+    today_done = today in set(dates)
+
+    if gap <= allowed_gap:
+        current_cluster = clusters[-1]
+        start = current_cluster[0]
+        current = (today - start).days + 1
+        active_set = set(current_cluster)
+        rest_days_current = sum(
+            1 for i in range(current)
+            if start + timedelta(days=i) not in active_set
+        )
+    else:
+        current = 0
+        rest_days_current = 0
+
+    best = max(historical_best, current)
+
+    if current == 0:
+        message = "🌱 Your previous streak ended. Practice today to start a new one."
+    elif today_done:
+        message = "✅ Today done — lekker bezig!"
+    elif gap <= REST_DAYS_ALLOWED:
+        remaining = REST_DAYS_ALLOWED + 1 - gap
+        message = f"🧊 Rest day — your streak is safe. {remaining} day{'s' if remaining != 1 else ''} of leeway left."
+    else:
+        message = "⚠️ Last chance — practice today to keep your streak."
+
+    last7 = []
+    active_all = set(dates)
+    for offset in range(6, -1, -1):
+        d = today - timedelta(days=offset)
+        last7.append({"date": d, "active": d in active_all, "today": offset == 0})
+
+    return {
+        "current": current,
+        "best": best,
+        "today_done": today_done,
+        "gap": gap,
+        "rest_days_current": rest_days_current,
+        "last7": last7,
+        "message": message,
+    }
+
+
+def render_streak_banner() -> None:
+    try:
+        summary = streak_summary(fetch_activity_dates())
+    except Exception as e:
+        st.caption(f"Streak temporarily unavailable: {e}")
+        return
+
+    dots = []
+    for d in summary["last7"]:
+        if d["active"]:
+            cls = "on"
+        else:
+            cls = "off"
+        if d["today"]:
+            cls += " today"
+        dots.append(f'<span class="trainer-dot {cls}" title="{d["date"].isoformat()}"></span>')
+
+    current = int(summary["current"])
+    best = int(summary["best"])
+    rests = int(summary["rest_days_current"])
+    noun = "day" if current == 1 else "days"
+    rest_noun = "rest day" if rests == 1 else "rest days"
+    flame = "🔥" if summary["today_done"] else ("🧊" if current else "🌱")
+
+    st.markdown(
+        f"""
+        <style>
+          .trainer-streak {{
+            border:1px solid rgba(128,128,128,.30); border-radius:18px;
+            padding:18px 20px; margin:4px 0 18px 0;
+          }}
+          .trainer-streak-top {{display:flex;gap:14px;align-items:center;flex-wrap:wrap;}}
+          .trainer-streak-num {{font-size:2.2rem;font-weight:750;line-height:1;}}
+          .trainer-streak-label {{font-size:1rem;letter-spacing:.08em;text-transform:uppercase;opacity:.72;}}
+          .trainer-dots {{margin-left:auto;display:flex;gap:8px;align-items:center;}}
+          .trainer-dot {{width:15px;height:15px;border-radius:50%;display:inline-block;border:1px solid rgba(128,128,128,.45);}}
+          .trainer-dot.on {{background:#d68a00;border-color:#d68a00;}}
+          .trainer-dot.off {{background:rgba(214,138,0,.12);}}
+          .trainer-dot.today {{outline:2px solid currentColor;outline-offset:3px;}}
+          .trainer-streak-msg {{margin-top:12px;font-size:1rem;}}
+          .trainer-streak-sub {{margin-top:6px;opacity:.72;font-size:.92rem;}}
+          @media (max-width: 520px) {{.trainer-dots{{margin-left:0;width:100%;}}}}
+        </style>
+        <div class="trainer-streak">
+          <div class="trainer-streak-top">
+            <span style="font-size:2rem">{flame}</span>
+            <span class="trainer-streak-num">{current}</span>
+            <span class="trainer-streak-label">{noun} streak · best: {best}</span>
+            <span class="trainer-dots">{''.join(dots)}</span>
+          </div>
+          <div class="trainer-streak-msg">{summary['message']}</div>
+          <div class="trainer-streak-sub">🧊 {rests} {rest_noun} in this streak · up to {REST_DAYS_ALLOWED} consecutive rest days allowed</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -490,6 +692,8 @@ except requests.HTTPError as exc:
     else:
         st.error(f"Supabase connection failed (HTTP {status}). Open Manage app → Logs for details.")
     st.stop()
+
+render_streak_banner()
 
 pages = st.tabs(["Practice", "Generate", "Add", "Library", "Progress"])
 
