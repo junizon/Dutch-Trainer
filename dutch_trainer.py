@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import html
 import json
 import random
@@ -445,6 +446,31 @@ def pronunciation_box(text: str, key: str) -> None:
 
 st.title("🇳🇱 Dutch Trainer")
 st.caption("Words · phrases · sentences — synced through Supabase")
+
+
+def require_password() -> None:
+    expected = secret("TRAINER_PASSWORD")
+    if not expected:
+        st.error("Trainer access is not configured yet. Add TRAINER_PASSWORD to Streamlit secrets.")
+        st.stop()
+
+    if st.session_state.get("trainer_authenticated"):
+        return
+
+    with st.form("trainer_login"):
+        entered = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Open trainer", type="primary")
+
+    if submitted:
+        if hmac.compare_digest(entered, expected):
+            st.session_state["trainer_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+require_password()
 
 if not configured():
     st.error("Supabase is not configured yet. Add SUPABASE_URL and SUPABASE_SERVICE_KEY to Streamlit secrets.")
