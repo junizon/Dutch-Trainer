@@ -312,7 +312,6 @@ def generate_items(level: str, topic: str, count: int, kinds: list[str]) -> list
                         "item_type": {"type": "string", "enum": ["word", "phrase", "sentence"]},
                         "dutch": {"type": "string"},
                         "english": {"type": "string"},
-                        "chinese": {"type": "string"},
                         "example_nl": {"type": "string"},
                         "example_en": {"type": "string"},
                         "accepted_answers": {"type": "array", "items": {"type": "string"}},
@@ -320,7 +319,7 @@ def generate_items(level: str, topic: str, count: int, kinds: list[str]) -> list
                         "notes": {"type": "string"},
                     },
                     "required": [
-                        "item_type", "dutch", "english", "chinese", "example_nl",
+                        "item_type", "dutch", "english", "example_nl",
                         "example_en", "accepted_answers", "theme", "notes"
                     ],
                     "additionalProperties": False,
@@ -343,7 +342,7 @@ Requirements:
 - Phrases should be useful chunks, not arbitrary fragments.
 - Sentences should be natural and worth memorising, generally 4-14 words.
 - English must be a concise cue suitable for a typing exercise.
-- Chinese should be Traditional Chinese; leave it an empty string only if a concise natural equivalent is genuinely awkward.
+- Do not generate Chinese translations.
 - example_nl/example_en are optional in spirit but must be strings; for a sentence item, they may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
 - Avoid duplicates or trivial variants of the same item.
@@ -376,7 +375,6 @@ Requirements:
             "item_type": raw["item_type"],
             "dutch": dutch,
             "english": english,
-            "chinese": str(raw.get("chinese", "")).strip(),
             "example_nl": str(raw.get("example_nl", "")).strip(),
             "example_en": str(raw.get("example_en", "")).strip(),
             "accepted_answers": raw.get("accepted_answers") or [],
@@ -531,11 +529,7 @@ with pages[0]:
             st.rerun()
     else:
         item = queue[idx]
-        english = item.get("english", "")
-        chinese = item.get("chinese", "")
-        cue = english
-        if chinese:
-            cue += f"\n\n{chinese}"
+        cue = item.get("english", "")
 
         st.caption(f"{item.get('item_type','item').title()} · {item.get('level','')} · {idx + 1}/{len(queue)}")
         st.markdown(f"### {html.escape(cue)}")
@@ -610,8 +604,6 @@ with pages[1]:
                 label = f"{row['item_type'].title()}: {row['dutch']} — {row['english']}"
                 if st.checkbox(label, value=True, key=f"gen_keep_{i}"):
                     chosen_ids.append(i)
-                if row.get("chinese"):
-                    st.caption(row["chinese"])
             if st.button("Save selected to trainer", type="primary"):
                 rows = [preview[i] for i in chosen_ids]
                 try:
@@ -630,7 +622,6 @@ with pages[2]:
         item_type = st.selectbox("Type", ["word", "phrase", "sentence"])
         dutch = st.text_input("Dutch")
         english = st.text_input("English cue")
-        chinese = st.text_input("Traditional Chinese cue (optional)")
         level = st.selectbox("Level", ["A1", "A2", "B1", "B2", "C1"], index=2, key="manual_level")
         theme = st.text_input("Theme", value="general")
         example_nl = st.text_input("Dutch example (optional)")
@@ -647,7 +638,6 @@ with pages[2]:
                 "item_type": item_type,
                 "dutch": dutch.strip(),
                 "english": english.strip(),
-                "chinese": chinese.strip(),
                 "example_nl": example_nl.strip(),
                 "example_en": example_en.strip(),
                 "accepted_answers": [x.strip() for x in alternatives.split("|") if x.strip()],
@@ -692,8 +682,6 @@ with pages[3]:
     for item in filtered[:200]:
         with st.expander(f"{item.get('dutch','')} — {item.get('english','')}"):
             st.write(f"Type: {item.get('item_type')} · Level: {item.get('level')} · Theme: {item.get('theme')}")
-            if item.get("chinese"):
-                st.write(item["chinese"])
             if item.get("example_nl"):
                 st.write(item["example_nl"])
             pronunciation_box(str(item.get("dutch", "")), f"lib-{item['id']}")
