@@ -151,6 +151,26 @@ def fetch_progress() -> dict[str, dict[str, Any]]:
     return {str(r["item_id"]): r for r in rows}
 
 
+def get_setting(key: str, default: Any) -> Any:
+    rows = supa_get("trainer_settings", {"key": f"eq.{key}", "select": "value", "limit": "1"})
+    if not rows:
+        return default
+    value = rows[0].get("value", default)
+    return default if value is None else value
+
+
+def set_setting(key: str, value: Any) -> None:
+    supa_post("trainer_settings", [{"key": key, "value": value}], upsert=True)
+
+
+def mastery_target() -> int:
+    try:
+        value = int(get_setting("mastery_target", 5))
+    except Exception:
+        value = 5
+    return 3 if value == 3 else 5
+
+
 def ensure_progress(item_id: str) -> dict[str, Any]:
     rows = supa_get("trainer_progress", {"item_id": f"eq.{item_id}", "select": "*"})
     if rows:
@@ -215,54 +235,108 @@ def classify_answer(item: dict[str, Any], answer: str) -> str:
     return "wrong"
 
 
-INTERVALS = [1, 3, 7, 14, 30, 60, 120]
+# Learning is deliberately spaced across days. A same-day rescue after a miss
+# is useful practice, but it does not count as another mastery success.
+LEARNING_INTERVALS = {
+    3: [2, 7],          # correct on day 0 -> +2d -> +7d -> retire on 3rd success
+    5: [1, 3, 7, 14],  # stronger track: roughly day 0, 1, 4, 11, 25
+}
+RETIRED_INTERVALS = [45, 90, 180, 365]
 
 
-def schedule_after(progress: dict[str, Any], grade: str) -> tuple[dict[str, Any], int]:
+def _next_retired_interval(before: int) -> int:
+    return next((x for x in RETIRED_INTERVALS if x > before), RETIRED_INTERVALS[-1])
+
+
+def _learning_interval(successes: int, target: int) -> int:
+    steps = LEARNING_INTERVALS[target]
+    if successes <= 0:
+        return 1
+    idx = min(successes - 1, len(steps) - 1)
+    return steps[idx]
+
+
+def schedule_after(
+    progress: dict[str, Any],
+    grade: str,
+    target: int,
+    was_retired: bool = False,
+) -> tuple[dict[str, Any], int, str]:
     before = int(progress.get("interval_days") or 0)
     attempts = int(progress.get("attempts") or 0) + 1
     correct = int(progress.get("correct") or 0)
     typo = int(progress.get("typo") or 0)
     wrong = int(progress.get("wrong") or 0)
     dont = int(progress.get("dont_know") or 0)
-    streak = int(progress.get("consecutive_correct") or 0)
+    successes = int(progress.get("consecutive_correct") or 0)
     difficulty = int(progress.get("difficulty") or 0)
 
-    if grade == "correct":
-        correct += 1
-        streak += 1
-        difficulty = max(0, difficulty - 1)
-        if before <= 0:
-            after = 1
-        else:
-            after = next((x for x in INTERVALS if x > before), INTERVALS[-1])
-    elif grade == "typo":
-        typo += 1
-        streak = max(0, streak - 1)
-        after = max(1, min(before or 1, 3))
-    elif grade == "dont_know":
-        dont += 1
-        streak = 0
-        difficulty += 2
-        after = 1
-    else:
-        wrong += 1
-        streak = 0
-        difficulty += 1
-        after = 1
+    last_day = _review_local_date(str(progress.get("last_reviewed_at") or ""))
+    today = local_today()
+    same_day = last_day == today
+    transition = ""
 
-    if after >= 30 and streak >= 3:
-        status = "mastered"
-    elif after >= 7 and streak >= 2:
-        status = "familiar"
-    elif attempts > 0:
-        status = "learning"
+    if was_retired:
+        if grade == "correct":
+            correct += 1
+            difficulty = max(0, difficulty - 1)
+            after = _next_retired_interval(before)
+            status = "mastered"
+            transition = "retired_pass"
+        elif grade == "typo":
+            typo += 1
+            # A typo is not evidence of forgetting. Keep it retired, but check
+            # it again sooner than a clean recall.
+            after = 30
+            status = "mastered"
+            transition = "retired_typo"
+        else:
+            if grade == "dont_know":
+                dont += 1
+                difficulty += 2
+            else:
+                wrong += 1
+                difficulty += 1
+            successes = 0
+            after = 0
+            status = "new"
+            transition = "relearn"
     else:
-        status = "new"
+        if grade == "correct":
+            correct += 1
+            difficulty = max(0, difficulty - 1)
+            # Only one clean recall per calendar day advances mastery. This
+            # stops same-session repetition from producing false mastery.
+            if not same_day:
+                successes += 1
+            if successes >= target:
+                after = RETIRED_INTERVALS[0]
+                status = "mastered"
+                transition = "retire"
+            else:
+                after = _learning_interval(successes, target)
+                status = "familiar" if successes >= max(2, target - 2) else "learning"
+        elif grade == "typo":
+            typo += 1
+            # Keep mastery credit; a spelling slip neither advances nor resets it.
+            after = max(1, min(before or 2, 3))
+            status = "familiar" if successes >= max(2, target - 2) else "learning"
+        elif grade == "dont_know":
+            dont += 1
+            successes = 0
+            difficulty += 2
+            after = 1
+            status = "learning"
+        else:
+            wrong += 1
+            successes = 0
+            difficulty += 1
+            after = 1
+            status = "learning"
 
     values = {
         "status": status,
-        "due_on": (date.today() + timedelta(days=after)).isoformat(),
+        "due_on": (today + timedelta(days=after)).isoformat(),
         "interval_days": after,
         "difficulty": difficulty,
         "attempts": attempts,
@@ -270,28 +344,21 @@ def schedule_after(progress: dict[str, Any], grade: str) -> tuple[dict[str, Any]
         "typo": typo,
         "wrong": wrong,
         "dont_know": dont,
-        "consecutive_correct": streak,
+        "consecutive_correct": successes,
         "last_grade": grade,
-        "last_reviewed_at": "now()",
+        "last_reviewed_at": datetime.now(_trainer_tz()).isoformat(),
     }
-    return values, before
+    return values, before, transition
 
 
-def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> bool:
-    """Save one review. Return True when the item is automatically retired."""
+def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> dict[str, Any]:
+    """Save one review and return the learning transition."""
     progress = ensure_progress(str(item["id"]))
-    values, before = schedule_after(progress, grade)
+    target = mastery_target()
+    was_retired = not bool(item.get("active", True)) or progress.get("status") == "mastered"
+    values, before, transition = schedule_after(progress, grade, target, was_retired=was_retired)
     after = int(values["interval_days"])
 
-    # A fully correct answer retires the item immediately. The review history
-    # remains permanent, and the item can still be reactivated from Library.
-    retired = grade == "correct"
-    if retired:
-        values["status"] = "mastered"
-
-    # PostgREST cannot interpret now() as SQL inside JSON, so omit the field and
-    # let updated_at remain server-side; reviewed_at is defaulted in reviews.
-    values.pop("last_reviewed_at", None)
     supa_patch("trainer_progress", {"item_id": f"eq.{item['id']}"}, values)
     supa_post(
         "trainer_reviews",
@@ -305,35 +372,88 @@ def save_review(item: dict[str, Any], answer: str, grade: str, prompt: str) -> b
             "interval_after": after,
         }],
     )
-    if retired:
+
+    if transition == "retire":
         supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": False})
+    elif transition == "relearn":
+        # A failed long-term review proves the item is no longer secure. Put it
+        # back in the ordinary New/Learning pool immediately.
+        supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": True})
+
     fetch_activity_dates.clear()
-    return retired
+    return {
+        "transition": transition,
+        "interval_after": after,
+        "successes": int(values.get("consecutive_correct") or 0),
+        "target": target,
+    }
 
 
 def practice_candidates(limit: int = 40) -> list[dict[str, Any]]:
-    items = fetch_items()
+    # Include retired items because their sparse long-term checks must return
+    # automatically when due. Permanently hidden/manual inactive items without
+    # mastered progress remain excluded.
+    items = fetch_items(include_inactive=True)
     prog = fetch_progress()
-    today = date.today().isoformat()
+    today = local_today().isoformat()
 
     scored: list[tuple[tuple[int, int, str], dict[str, Any]]] = []
     for item in items:
         p = prog.get(str(item["id"]))
+        active = bool(item.get("active", True))
+
         if not p:
-            pri = (1, 0, item.get("created_at", ""))  # new comes after due reviews
+            if not active:
+                continue
+            pri = (2, 0, item.get("created_at", ""))  # unseen after scheduled reviews
         else:
             due = str(p.get("due_on") or today)
             if due > today:
                 continue
+            status = str(p.get("status") or "new")
             difficulty = int(p.get("difficulty") or 0)
-            pri = (0, -difficulty, due)
+            if not active and status == "mastered":
+                pri = (0, -difficulty, due)  # sparse retired review: don't miss it
+            elif active:
+                pri = (1, -difficulty, due)
+            else:
+                continue
         scored.append((pri, item))
 
     scored.sort(key=lambda x: x[0])
-    due_items = [x[1] for x in scored]
-    if len(due_items) > limit:
-        due_items = due_items[:limit]
-    return due_items
+    return [x[1] for x in scored[:limit]]
+
+
+def migrate_scheduler_v2() -> None:
+    """Undo the brief v1.5 one-correct retirement rule once."""
+    try:
+        version = int(get_setting("scheduler_version", 1))
+    except Exception:
+        version = 1
+    if version >= 2:
+        return
+
+    target = mastery_target()
+    items = fetch_items(include_inactive=True)
+    prog = fetch_progress()
+    for item in items:
+        if item.get("active", True):
+            continue
+        p = prog.get(str(item["id"]))
+        if not p or p.get("status") != "mastered":
+            continue
+        if int(p.get("consecutive_correct") or 0) < target:
+            supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": True})
+            supa_patch(
+                "trainer_progress",
+                {"item_id": f"eq.{item['id']}"},
+                {
+                    "status": "learning",
+                    "due_on": local_today().isoformat(),
+                    "interval_days": 0,
+                },
+            )
+    set_setting("scheduler_version", 2)
 
 
 # -----------------------------------------------------------------------------
@@ -703,6 +823,11 @@ except requests.HTTPError as exc:
         st.error(f"Supabase connection failed (HTTP {status}). Open Manage app → Logs for details.")
     st.stop()
 
+try:
+    migrate_scheduler_v2()
+except Exception as e:
+    st.caption(f"Learning-schedule migration skipped: {e}")
+
 render_streak_banner()
 
 pages = st.tabs(["Practice", "Generate", "Add", "Library", "Progress"])
@@ -711,6 +836,26 @@ pages = st.tabs(["Practice", "Generate", "Add", "Library", "Progress"])
 # Practice --------------------------------------------------------------------
 with pages[0]:
     st.subheader("Practice")
+
+    current_target = mastery_target()
+    with st.expander("⚙️ Learning settings"):
+        chosen_target = st.radio(
+            "Retire an item after",
+            [3, 5],
+            index=0 if current_target == 3 else 1,
+            horizontal=True,
+            format_func=lambda x: "3 correct recalls · faster" if x == 3 else "5 correct recalls · stronger (recommended)",
+            key="mastery_target_choice",
+        )
+        st.caption(
+            "Only one correct recall per calendar day counts toward retirement. "
+            "Retired items return after 45, 90, 180 and then 365 days. "
+            "If you forget one on a retired review, it returns to the New pool."
+        )
+        if int(chosen_target) != current_target:
+            set_setting("mastery_target", int(chosen_target))
+            current_target = int(chosen_target)
+            st.success(f"Mastery target changed to {current_target} correct recalls.")
 
     if "practice_queue" not in st.session_state:
         st.session_state.practice_queue = []
@@ -745,7 +890,15 @@ with pages[0]:
         item = queue[idx]
         cue = item.get("english", "")
 
-        st.caption(f"{item.get('item_type','item').title()} · {item.get('level','')} · {idx + 1}/{len(queue)}")
+        item_progress = ensure_progress(str(item["id"]))
+        item_retired = not bool(item.get("active", True)) or item_progress.get("status") == "mastered"
+        if item_retired:
+            stage = f"Retired review · last interval {int(item_progress.get('interval_days') or 0)} days"
+        else:
+            stage = f"Recall {int(item_progress.get('consecutive_correct') or 0)}/{current_target} toward retirement"
+        st.caption(
+            f"{item.get('item_type','item').title()} · {item.get('level','')} · {stage} · {idx + 1}/{len(queue)}"
+        )
         st.markdown(f"### {html.escape(cue)}")
 
         answer_key = f"ans_{item['id']}_{idx}"
@@ -757,20 +910,23 @@ with pages[0]:
 
         if submit or dont:
             grade = "dont_know" if dont else classify_answer(item, typed)
-            retired = save_review(item, typed, grade, cue)
+            result = save_review(item, typed, grade, cue)
+            transition = result.get("transition", "")
             st.session_state.practice_feedback = {
                 "grade": grade,
                 "typed": typed,
                 "correct": item.get("dutch", ""),
-                "retired": retired,
+                "transition": transition,
+                "interval_after": result.get("interval_after", 0),
+                "successes": result.get("successes", 0),
+                "target": result.get("target", current_target),
             }
             # Real mistakes return later in the same session after a few cards.
             if grade in {"wrong", "dont_know"}:
                 insert_at = min(len(queue), idx + 4)
                 queue.insert(insert_at, item)
-            elif retired:
-                # If this item had been requeued after an earlier miss, remove
-                # those future copies now that it has been answered correctly.
+            elif transition in {"retire", "retired_pass", "retired_typo"}:
+                # Remove stale future copies. Long-term review timing now lives in Supabase.
                 queue = queue[:idx + 1] + [
                     q for q in queue[idx + 1:] if str(q.get("id")) != str(item.get("id"))
                 ]
@@ -786,8 +942,22 @@ with pages[0]:
                 "dont_know": "🌱 Marked as not known yet",
             }
             st.write(labels.get(fb["grade"], fb["grade"]))
-            if fb.get("retired"):
-                st.caption("🏁 Correct — automatically retired from future practice.")
+            transition = fb.get("transition", "")
+            if transition == "retire":
+                st.caption(
+                    f"🏁 Learned: {fb.get('target')} spaced correct recalls. "
+                    f"Retired for now; next memory check in {fb.get('interval_after')} days."
+                )
+            elif transition == "retired_pass":
+                st.caption(f"🧠 Long-term memory confirmed. Next review in {fb.get('interval_after')} days.")
+            elif transition == "retired_typo":
+                st.caption(f"⌨️ Still retired, but scheduled a closer check in {fb.get('interval_after')} days.")
+            elif transition == "relearn":
+                st.caption("🔄 This retired item was forgotten, so it has returned to the New pool.")
+            elif fb.get("grade") == "correct":
+                st.caption(
+                    f"Memory strength: {fb.get('successes')}/{fb.get('target')} spaced correct recalls."
+                )
             st.markdown(f"**Dutch:** {html.escape(str(item.get('dutch','')))}")
             if item.get("example_nl"):
                 st.caption(str(item.get("example_nl")))
@@ -883,12 +1053,16 @@ with pages[2]:
 # Library ---------------------------------------------------------------------
 with pages[3]:
     st.subheader("Library")
-    st.caption("Correct items retire automatically. Search or reopen retired material whenever you want.")
+    st.caption("Items retire only after your chosen mastery target, then return automatically for sparse long-term reviews.")
     try:
         items = fetch_items(include_inactive=True)
+        library_progress = fetch_progress()
+        library_target = mastery_target()
     except Exception as e:
         st.error(f"Could not load library: {e}")
         items = []
+        library_progress = {}
+        library_target = 5
 
     f1, f2 = st.columns([2, 1])
     search = f1.text_input("Search Dutch / English", key="library_search")
@@ -938,32 +1112,35 @@ with pages[3]:
 
     for item in filtered[lo:hi]:
         active = bool(item.get("active", True))
-        status_label = "active" if active else "retired"
+        p = library_progress.get(str(item["id"]), {})
+        if active:
+            successes = int(p.get("consecutive_correct") or 0)
+            status_label = f"learning {successes}/{library_target}"
+        else:
+            due = str(p.get("due_on") or "")
+            status_label = f"retired · next review {due}" if due else "retired"
         with st.expander(f"{item.get('dutch','')} — {item.get('english','')} · {status_label}"):
             st.write(f"Type: {item.get('item_type')} · Level: {item.get('level')} · Theme: {item.get('theme')}")
             if item.get("example_nl"):
                 st.write(item["example_nl"])
             pronunciation_box(str(item.get("dutch", "")), f"lib-{item['id']}")
-            if active:
-                if st.button("Retire now", key=f"archive_{item['id']}"):
-                    try:
-                        supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": False})
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Could not retire: {e}")
-            else:
-                if st.button("Reactivate for practice", key=f"reactivate_{item['id']}"):
+            if not active:
+                if st.button("Return to learning now", key=f"reactivate_{item['id']}"):
                     try:
                         supa_patch("trainer_items", {"id": f"eq.{item['id']}"}, {"active": True})
-                        # Bring it back immediately rather than waiting for an old due date.
                         supa_patch(
                             "trainer_progress",
                             {"item_id": f"eq.{item['id']}"},
-                            {"status": "learning", "due_on": date.today().isoformat()},
+                            {
+                                "status": "new",
+                                "due_on": local_today().isoformat(),
+                                "interval_days": 0,
+                                "consecutive_correct": 0,
+                            },
                         )
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Could not reactivate: {e}")
+                        st.error(f"Could not return item to learning: {e}")
 
 
 # Progress --------------------------------------------------------------------
@@ -979,13 +1156,17 @@ with pages[4]:
 
     counts = {"new": 0, "learning": 0, "familiar": 0}
     due = 0
+    retired_due = 0
     retired = 0
-    today = date.today().isoformat()
+    today = local_today().isoformat()
     for item in items:
+        p = prog.get(str(item["id"]))
         if not item.get("active", True):
             retired += 1
+            if p and str(p.get("due_on") or today) <= today:
+                due += 1
+                retired_due += 1
             continue
-        p = prog.get(str(item["id"]))
         if not p:
             counts["new"] += 1
             due += 1
@@ -1003,6 +1184,12 @@ with pages[4]:
     cols[2].metric("Familiar", counts["familiar"])
     cols[3].metric("Retired", retired)
     st.metric("Due now", due)
+    if retired_due:
+        st.caption(f"{retired_due} of the due items are long-term reviews of retired material.")
+    st.caption(
+        f"Current mastery rule: retire after {mastery_target()} spaced correct recalls; "
+        "retired reviews expand to 45 → 90 → 180 → 365 days when remembered."
+    )
 
     if reviews:
         grades = {"correct": 0, "typo": 0, "wrong": 0, "dont_know": 0}
