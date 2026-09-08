@@ -215,14 +215,16 @@ def set_setting_async(key: str, value: Any) -> None:
     _pending_syncs().append(future)
 
 
-def save_resume_state_async(mode: str, item_id: str | None) -> None:
+def save_resume_state_async(mode: str, item_id: str | None, verb_tense: str = "Mixed") -> None:
     """Remember the next unfinished practice item across browser/app sessions."""
     rows = [
         {"key": "practice_resume_mode", "value": mode},
         {"key": "practice_resume_item_id", "value": item_id or ""},
+        {"key": "practice_resume_verb_tense", "value": verb_tense},
     ]
     _settings_cache()["practice_resume_mode"] = mode
     _settings_cache()["practice_resume_item_id"] = item_id or ""
+    _settings_cache()["practice_resume_verb_tense"] = verb_tense
     future = SYNC_WRITER.submit(supa_post, "trainer_settings", rows, True, False)
     _pending_syncs().append(future)
 
@@ -283,9 +285,18 @@ def answer_variants(item: dict[str, Any]) -> list[str]:
     return [normalize(v) for v in vals if normalize(v)]
 
 
-def classify_answer(item: dict[str, Any], answer: str) -> str:
+def classify_answer_values(correct_answer: str, accepted_answers: Any, answer: str) -> str:
     mine = normalize(answer)
-    variants = answer_variants(item)
+    extra = accepted_answers or []
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = []
+    variants = [normalize(correct_answer)]
+    if isinstance(extra, list):
+        variants.extend(normalize(str(x)) for x in extra if normalize(str(x)))
+    variants = [v for v in variants if v]
     if mine in variants:
         return "correct"
     if not mine:
@@ -300,6 +311,86 @@ def classify_answer(item: dict[str, Any], answer: str) -> str:
     if target_len >= 12 and best >= 0.94:
         return "typo"
     return "wrong"
+
+
+def classify_answer(item: dict[str, Any], answer: str) -> str:
+    return classify_answer_values(
+        str(item.get("dutch", "")),
+        item.get("accepted_answers") or [],
+        answer,
+    )
+
+
+def verb_data(item: dict[str, Any]) -> dict[str, Any]:
+    """Return structured verb-drill data stored inside the existing notes column."""
+    raw = item.get("notes") or ""
+    if not isinstance(raw, str) or not raw.strip().startswith("{"):
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or data.get("kind") != "verb_drill":
+        return {}
+    return data
+
+
+def is_verb_item(item: dict[str, Any]) -> bool:
+    return bool(verb_data(item))
+
+
+def verb_exercises(item: dict[str, Any], tense: str = "Mixed") -> list[dict[str, Any]]:
+    data = verb_data(item)
+    rows = data.get("exercises") if data else []
+    if not isinstance(rows, list):
+        return []
+    cleaned = []
+    for ex in rows:
+        if not isinstance(ex, dict):
+            continue
+        dutch = str(ex.get("dutch", "")).strip()
+        english = str(ex.get("english", "")).strip()
+        ex_tense = str(ex.get("tense", "")).strip().lower()
+        if not dutch or not english or ex_tense not in {"present", "past", "perfect"}:
+            continue
+        cleaned.append({
+            "dutch": dutch,
+            "english": english,
+            "tense": ex_tense,
+            "subject": str(ex.get("subject", "")).strip(),
+            "accepted_answers": ex.get("accepted_answers") or [],
+        })
+
+    if tense != "Mixed":
+        wanted = tense.lower()
+        return [ex for ex in cleaned if ex["tense"] == wanted]
+
+    # Interleave tenses so the first 3–5 successful recalls demonstrate
+    # genuinely different forms rather than five near-identical present forms.
+    buckets = {name: [x for x in cleaned if x["tense"] == name] for name in ("present", "past", "perfect")}
+    mixed: list[dict[str, Any]] = []
+    longest = max((len(v) for v in buckets.values()), default=0)
+    for i in range(longest):
+        for name in ("present", "past", "perfect"):
+            if i < len(buckets[name]):
+                mixed.append(buckets[name][i])
+    return mixed
+
+
+def pick_verb_exercise(item: dict[str, Any], tense: str = "Mixed") -> dict[str, Any] | None:
+    retry = item.get("_verb_retry_exercise")
+    if isinstance(retry, dict) and (tense == "Mixed" or retry.get("tense") == tense.lower()):
+        return retry
+    exercises = verb_exercises(item, tense)
+    if not exercises:
+        return None
+    progress = dict(item.get("_progress") or {})
+    status = str(progress.get("status") or "new")
+    if status == "mastered" or not bool(item.get("active", True)):
+        index = int(progress.get("attempts") or 0) % len(exercises)
+    else:
+        index = int(progress.get("consecutive_correct") or 0) % len(exercises)
+    return exercises[index]
 
 
 # One clean recall per calendar day can advance mastery. Retired items receive
@@ -951,6 +1042,126 @@ Requirements:
     return out
 
 
+def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, Any]]:
+    """Generate verb families once; all later conjugation practice is local/Supabase."""
+    if not OPENAI_KEY or OpenAI is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    client = OpenAI(api_key=OPENAI_KEY)
+    exercise_schema = {
+        "type": "object",
+        "properties": {
+            "tense": {"type": "string", "enum": ["present", "past", "perfect"]},
+            "subject": {"type": "string"},
+            "english": {"type": "string"},
+            "dutch": {"type": "string"},
+            "accepted_answers": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["tense", "subject", "english", "dutch", "accepted_answers"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "verbs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "infinitive": {"type": "string"},
+                        "english": {"type": "string"},
+                        "exercises": {"type": "array", "items": exercise_schema},
+                    },
+                    "required": ["infinitive", "english", "exercises"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["verbs"],
+        "additionalProperties": False,
+    }
+
+    prompt = f"""
+Create exactly {count} useful Dutch verb-conjugation drill sets for an adult learner at CEFR {level}.
+Topic/context preference: {topic or 'everyday Dutch'}.
+
+For EACH verb:
+- Give the Dutch infinitive and a concise English meaning.
+- Create exactly 15 SHORT, natural sentence drills: 5 present, 5 simple past, 5 perfect tense.
+- Across each tense, vary the grammatical subjects: ik, jij/je, hij/zij/het, wij/we, jullie/zij where natural.
+- Keep sentences practical and generally 3-9 words.
+- The English sentence is the cue; the learner must type the complete Dutch sentence.
+- Use contemporary Netherlands Dutch.
+- Include irregular, separable and modal verbs when appropriate for the level/topic, but do not make every set difficult.
+- In perfect tense, use the correct auxiliary and past participle.
+- accepted_answers may contain only genuinely equivalent Dutch variants (for example je/jij when both are natural), not loose paraphrases.
+- Avoid duplicate sentence patterns inside a verb set.
+- Do not include Chinese.
+""".strip()
+
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+        store=False,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "dutch_verb_drill_sets",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+    data = json.loads(response.output_text)
+    out: list[dict[str, Any]] = []
+    for raw in data.get("verbs", []):
+        infinitive = str(raw.get("infinitive", "")).strip()
+        english = str(raw.get("english", "")).strip()
+        exercises = raw.get("exercises") or []
+        if not infinitive or not english or not isinstance(exercises, list):
+            continue
+        valid = []
+        for ex in exercises:
+            if not isinstance(ex, dict):
+                continue
+            ex_tense = str(ex.get("tense", "")).strip().lower()
+            ex_nl = str(ex.get("dutch", "")).strip()
+            ex_en = str(ex.get("english", "")).strip()
+            if ex_tense not in {"present", "past", "perfect"} or not ex_nl or not ex_en:
+                continue
+            valid.append({
+                "tense": ex_tense,
+                "subject": str(ex.get("subject", "")).strip(),
+                "english": ex_en,
+                "dutch": ex_nl,
+                "accepted_answers": ex.get("accepted_answers") or [],
+            })
+        # A verb set must contain enough varied material to support the 5-recall rule.
+        if len(valid) < 10:
+            continue
+        first = valid[0]
+        notes = json.dumps(
+            {"kind": "verb_drill", "lemma": infinitive, "exercises": valid},
+            ensure_ascii=False,
+        )
+        out.append({
+            # Store verb families as sentence items so the existing Supabase schema
+            # needs no change; notes.kind=verb_drill distinguishes them.
+            "item_type": "sentence",
+            "dutch": infinitive,
+            "english": english,
+            "example_nl": first["dutch"],
+            "example_en": first["english"],
+            "accepted_answers": [],
+            "level": level,
+            "theme": topic or "verb conjugation",
+            "notes": notes,
+            "source": "ai",
+            "active": True,
+        })
+    return out
+
+
 def insert_items(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
     added = 0
     skipped: list[str] = []
@@ -1051,7 +1262,7 @@ def apply_app_css(scale: float) -> None:
           html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
             color-scheme:light !important;
           }}
-          .stApp {{ background:#f5f8fb; color:#173a68 !important; }}
+          .stApp {{ background:#f3ead9; color:#2d2118 !important; }}
           .block-container {{ max-width:760px; padding-top:1.05rem; padding-bottom:2.5rem; }}
           #MainMenu, footer {{ visibility:hidden; }}
           header[data-testid="stHeader"] {{ background:transparent; }}
@@ -1061,44 +1272,44 @@ def apply_app_css(scale: float) -> None:
           [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
           [data-testid="stRadio"] label, [data-testid="stRadio"] label p,
           [data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {{
-            color:#426b98 !important; -webkit-text-fill-color:#426b98 !important;
+            color:#745f47 !important; -webkit-text-fill-color:#745f47 !important;
           }}
-          [data-testid="stRadio"] svg {{ color:#4773a6 !important; }}
+          [data-testid="stRadio"] svg {{ color:#c3780a !important; }}
           [data-baseweb="input"], [data-baseweb="textarea"],
           .stTextInput input, .stTextArea textarea {{
-            background:#ffffff !important; color:#173a68 !important;
-            -webkit-text-fill-color:#173a68 !important;
+            background:#ffffff !important; color:#2d2118 !important;
+            -webkit-text-fill-color:#2d2118 !important;
           }}
           .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
-            color:#9aaabd !important; -webkit-text-fill-color:#9aaabd !important; opacity:1 !important;
+            color:#ad9b82 !important; -webkit-text-fill-color:#ad9b82 !important; opacity:1 !important;
           }}
           button[kind="secondary"] {{
-            background:#ffffff !important; color:#426b98 !important;
-            border-color:#cbd9e8 !important;
+            background:#ffffff !important; color:#745f47 !important;
+            border-color:#d7c4a3 !important;
           }}
           button[kind="primary"] {{
-            background:#173a68 !important; color:#ffffff !important;
-            border-color:#173a68 !important;
+            background:#2d2118 !important; color:#ffffff !important;
+            border-color:#2d2118 !important;
           }}
           button[kind="secondary"] p, button[kind="primary"] p {{ color:inherit !important; -webkit-text-fill-color:inherit !important; }}
           button:disabled {{ opacity:.48 !important; }}
 
-          .trainer-kicker {{ color:#4773a6; letter-spacing:.18em; font-size:.78rem; font-weight:800; margin-bottom:.15rem; }}
-          .trainer-title {{ color:#173a68; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
-          .trainer-sub {{ color:#6c829e; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
+          .trainer-kicker {{ color:#c3780a; letter-spacing:.18em; font-size:.78rem; font-weight:800; margin-bottom:.15rem; }}
+          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
+          .trainer-sub {{ color:#7b6e5d; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
 
-          .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #d9e3ef; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(44,77,116,.05); }}
+          .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #ddcbaa; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(75,53,31,.06); }}
           .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }}
           .activity-left {{ display:flex; align-items:center; gap:9px; min-width:0; }}
-          .streak-pill {{ border:1px solid #f0cda9; background:#fff7ef; color:#c96f18; border-radius:999px; padding:4px 9px; font-size:{0.78 * scale:.3f}rem; letter-spacing:.04em; white-space:nowrap; }}
+          .streak-pill {{ border:1px solid #f0cda9; background:#fff8ec; color:#c67500; border-radius:999px; padding:4px 9px; font-size:{0.78 * scale:.3f}rem; letter-spacing:.04em; white-space:nowrap; }}
           .trainer-dots {{ display:flex; gap:5px; align-items:center; }}
-          .trainer-dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; border:1px solid #c7d6e6; background:#edf3f8; }}
-          .trainer-dot.active {{ background:#4773a6; border-color:#4773a6; }}
-          .trainer-dot.rest {{ background:#fff2dc; border-color:#e6c58d; }}
-          .trainer-dot.today {{ outline:1.5px solid #173a68; outline-offset:2px; }}
-          .activity-inline-stats {{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; color:#7590ad; font-size:{0.69 * scale:.3f}rem; }}
-          .activity-inline-stats strong {{ color:#173a68; font-size:{0.82 * scale:.3f}rem; }}
-          .activity-foot {{ color:#8195aa; font-size:{0.65 * scale:.3f}rem; margin-top:4px; text-align:right; }}
+          .trainer-dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; border:1px solid #d8c6a5; background:#f8f0df; }}
+          .trainer-dot.active {{ background:#c3780a; border-color:#c3780a; }}
+          .trainer-dot.rest {{ background:#f2e5ca; border-color:#d5b77f; }}
+          .trainer-dot.today {{ outline:1.5px solid #2d2118; outline-offset:2px; }}
+          .activity-inline-stats {{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; color:#8a7964; font-size:{0.69 * scale:.3f}rem; }}
+          .activity-inline-stats strong {{ color:#2d2118; font-size:{0.82 * scale:.3f}rem; }}
+          .activity-foot {{ color:#8a7964; font-size:{0.65 * scale:.3f}rem; margin-top:4px; text-align:right; }}
           @media (max-width: 640px) {{
             .activity-card {{ padding:7px 9px 6px; }}
             .activity-top {{ gap:6px; }}
@@ -1107,19 +1318,19 @@ def apply_app_css(scale: float) -> None:
             .activity-foot {{ margin-top:2px; text-align:right; }}
           }}
 
-          .cue-card {{ background:#fff; border:1px solid #d6e1ed; border-radius:12px; padding:30px 18px; margin:12px 0 14px; box-shadow:0 8px 22px rgba(44,77,116,.07); text-align:center; }}
-          .cue-kicker {{ color:#7893b0; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
-          .cue-text {{ color:#173a68; font-family:Georgia, 'Times New Roman', serif; font-size:{2.05 * scale:.3f}rem; line-height:1.2; margin-top:12px; overflow-wrap:anywhere; }}
-          .stage-line {{ color:#66819f; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
-          .compact-stats {{ color:#65809e; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
-          .sync-line {{ color:#7890a8; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
-          .keyboard-hint {{ color:#8297ae; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
+          .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:12px; padding:30px 18px; margin:12px 0 14px; box-shadow:0 8px 22px rgba(75,53,31,.07); text-align:center; }}
+          .cue-kicker {{ color:#987d5a; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
+          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.05 * scale:.3f}rem; line-height:1.2; margin-top:12px; overflow-wrap:anywhere; }}
+          .stage-line {{ color:#806f59; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
+          .compact-stats {{ color:#806f59; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
+          .sync-line {{ color:#897761; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
+          .keyboard-hint {{ color:#95836d; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.05 * scale:.3f}rem !important; }}
           .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
-          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#7088a3 !important; font-size:{0.80 * scale:.3f}rem !important; }}
+          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#806f59 !important; font-size:{0.80 * scale:.3f}rem !important; }}
 
           /* Keep the small A− / A+ controls in one row on narrow Android screens. */
           .st-key-font_controls [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center !important; }}
@@ -1143,21 +1354,30 @@ def apply_app_css(scale: float) -> None:
 def practice_type_set(mode: str) -> set[str] | None:
     return {
         "Words": {"word"},
+        "Verbs": {"sentence"},
         "Phrases": {"phrase"},
         "Sentences": {"sentence"},
     }.get(mode)
 
 
-def load_practice(mode: str) -> None:
+def load_practice(mode: str, verb_tense: str = "Mixed") -> None:
     queue, stats = practice_candidates(40, practice_type_set(mode))
+    if mode == "Verbs":
+        queue = [item for item in queue if is_verb_item(item) and verb_exercises(item, verb_tense)]
+        stats["due"] = len(queue)
+        stats["total"] = len(queue)
+    elif mode == "Sentences":
+        # Verb sets live in the existing sentence item type internally, but have
+        # their own practice mode and should not also appear as ordinary sentences.
+        queue = [item for item in queue if not is_verb_item(item)]
+        stats["due"] = len(queue)
 
     # Resume at the last unfinished card if it is still due and still belongs to
-    # this practice mode. The remainder of the queue can be rebuilt safely:
-    # already answered cards have their next due date in Supabase and therefore
-    # do not suddenly reappear when the app is reopened.
+    # this practice mode/verb-tense choice. The remainder of the queue can be rebuilt safely.
     saved_mode = str(get_setting("practice_resume_mode", mode) or mode)
+    saved_tense = str(get_setting("practice_resume_verb_tense", "Mixed") or "Mixed")
     saved_item_id = str(get_setting("practice_resume_item_id", "") or "")
-    if saved_mode == mode and saved_item_id:
+    if saved_mode == mode and (mode != "Verbs" or saved_tense == verb_tense) and saved_item_id:
         for pos, queued in enumerate(queue):
             if str(queued.get("id")) == saved_item_id:
                 queue = queue[pos:] + queue[:pos]
@@ -1167,19 +1387,19 @@ def load_practice(mode: str) -> None:
     st.session_state.practice_stats = stats
     st.session_state.practice_index = 0
     st.session_state.practice_feedback = None
-    st.session_state.practice_loaded_mode = mode
+    st.session_state.practice_loaded_key = f"{mode}|{verb_tense}"
     next_id = str(queue[0].get("id")) if queue else None
-    save_resume_state_async(mode, next_id)
+    save_resume_state_async(mode, next_id, verb_tense)
 
 
-def advance_practice(mode: str) -> None:
+def advance_practice(mode: str, verb_tense: str = "Mixed") -> None:
     """Advance before the rerun so clicking Next needs only one Streamlit pass."""
     queue = st.session_state.get("practice_queue", [])
     idx = int(st.session_state.get("practice_index", 0)) + 1
     st.session_state.practice_index = idx
     st.session_state.practice_feedback = None
     next_id = str(queue[idx].get("id")) if idx < len(queue) else None
-    save_resume_state_async(mode, next_id)
+    save_resume_state_async(mode, next_id, verb_tense)
 
 
 def install_keyboard_shortcuts() -> None:
@@ -1269,7 +1489,7 @@ st.markdown(
     """
     <div class="trainer-kicker">OEFENEN</div>
     <div class="trainer-title">Dutch word trainer</div>
-    <div class="trainer-sub">Words · phrases · sentences · long-term review</div>
+    <div class="trainer-sub">Words · verbs · phrases · sentences · long-term review</div>
     """,
     unsafe_allow_html=True,
 )
@@ -1317,14 +1537,14 @@ if page == "Practice":
     current_target = mastery_target()
     install_keyboard_shortcuts()
 
-    mode_options = ["Everything", "Words", "Phrases", "Sentences"]
+    mode_options = ["Everything", "Words", "Verbs", "Phrases", "Sentences"]
     if "practice_mode" not in st.session_state:
         saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
         st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
 
     # Compact practice controls. On a laptop these sit on one row; Streamlit can
     # wrap/stack the columns on a narrow phone screen without changing behaviour.
-    mode_col, target_col, refresh_col = st.columns([4.8, 2.8, 0.8], gap="small")
+    mode_col, target_col, refresh_col = st.columns([5.4, 2.4, 0.7], gap="small")
 
     with mode_col:
         mode = st.radio(
@@ -1348,10 +1568,23 @@ if page == "Practice":
         if int(chosen_target) != current_target:
             set_setting("mastery_target", int(chosen_target))
             current_target = int(chosen_target)
-            # Existing local queue can keep going; the next answer uses the new target.
 
     with refresh_col:
         refresh = st.button("↻", key="practice_refresh", help="Refresh practice queue", use_container_width=True)
+
+    verb_tense = "Mixed"
+    if mode == "Verbs":
+        tense_options = ["Mixed", "Present", "Past", "Perfect"]
+        if "verb_tense_choice" not in st.session_state:
+            saved_tense = str(get_setting("practice_resume_verb_tense", "Mixed") or "Mixed")
+            st.session_state.verb_tense_choice = saved_tense if saved_tense in tense_options else "Mixed"
+        verb_tense = st.radio(
+            "Verb tense",
+            tense_options,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="verb_tense_choice",
+        )
 
     st.caption(
         "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · forgotten items return to learning."
@@ -1366,11 +1599,12 @@ if page == "Practice":
         st.session_state.practice_stats = {"in_progress": 0, "retired": 0, "due": 0, "total": 0}
         st.session_state.practice_index = 0
         st.session_state.practice_feedback = None
-        st.session_state.practice_loaded_mode = None
+        st.session_state.practice_loaded_key = None
 
-    if refresh or st.session_state.get("practice_loaded_mode") != mode:
+    loaded_key = f"{mode}|{verb_tense}"
+    if refresh or st.session_state.get("practice_loaded_key") != loaded_key:
         with st.spinner("Loading practice…"):
-            load_practice(mode)
+            load_practice(mode, verb_tense)
 
     queue = st.session_state.practice_queue
     idx = int(st.session_state.practice_index)
@@ -1379,17 +1613,28 @@ if page == "Practice":
     if not queue:
         st.info(f"Nothing is due in {mode.lower()} right now. You can generate/add material or choose another practice type.")
         if st.button("Check again", type="primary"):
-            load_practice(mode)
+            load_practice(mode, verb_tense)
             st.rerun()
     elif idx >= len(queue):
         st.success("Session finished.")
         if st.button("Start another session", type="primary", use_container_width=True):
-            load_practice(mode)
+            load_practice(mode, verb_tense)
             st.rerun()
     else:
         item = queue[idx]
-        cue = str(item.get("english", ""))
         item_progress = dict(item.get("_progress") or _default_progress(str(item["id"])))
+        verb_exercise = pick_verb_exercise(item, verb_tense) if is_verb_item(item) else None
+        if verb_exercise:
+            cue = str(verb_exercise.get("english", ""))
+            correct_answer = str(verb_exercise.get("dutch", ""))
+            accepted_answers = verb_exercise.get("accepted_answers") or []
+            verb_label = f"VERB · {str(item.get('dutch',''))} · {str(verb_exercise.get('tense','')).upper()}"
+        else:
+            cue = str(item.get("english", ""))
+            correct_answer = str(item.get("dutch", ""))
+            accepted_answers = item.get("accepted_answers") or []
+            verb_label = str(item.get("item_type", "item")).upper()
+
         item_retired = not bool(item.get("active", True)) or item_progress.get("status") == "mastered"
         if item_retired:
             stage = f"Retired review · {int(item_progress.get('interval_days') or 0)}-day interval"
@@ -1397,7 +1642,7 @@ if page == "Practice":
             stage = f"{int(item_progress.get('consecutive_correct') or 0)}/{current_target} recalls toward retirement"
 
         st.markdown(
-            f'<div class="stage-line">{html.escape(str(item.get("item_type", "item")).upper())} · '
+            f'<div class="stage-line">{html.escape(verb_label)} · '
             f'{html.escape(str(item.get("level", "")))} · {html.escape(stage)} · {idx + 1}/{len(queue)}</div>',
             unsafe_allow_html=True,
         )
@@ -1409,11 +1654,13 @@ if page == "Practice":
 
         fb = st.session_state.practice_feedback
         if not fb:
-            placeholder = {
-                "word": "type the Dutch word",
-                "phrase": "type the Dutch phrase",
-                "sentence": "type the Dutch sentence",
-            }.get(str(item.get("item_type")), "type the Dutch")
+            placeholder = (
+                "type the complete Dutch sentence" if is_verb_item(item) else {
+                    "word": "type the Dutch word",
+                    "phrase": "type the Dutch phrase",
+                    "sentence": "type the Dutch sentence",
+                }.get(str(item.get("item_type")), "type the Dutch")
+            )
 
             with st.form(f"answer_form_{item['id']}_{idx}", clear_on_submit=False):
                 typed = st.text_input(
@@ -1427,17 +1674,24 @@ if page == "Practice":
                 dont = b2.form_submit_button("I don't know", use_container_width=True)
 
             if submit or dont:
-                grade = "dont_know" if dont else classify_answer(item, typed)
+                grade = "dont_know" if dont else classify_answer_values(correct_answer, accepted_answers, typed)
                 result = save_review_async(item, typed, grade, cue, current_target)
                 transition = result.get("transition", "")
+                if verb_exercise:
+                    if grade in {"wrong", "dont_know", "typo"}:
+                        item["_verb_retry_exercise"] = verb_exercise
+                    else:
+                        item.pop("_verb_retry_exercise", None)
                 st.session_state.practice_feedback = {
                     "grade": grade,
                     "typed": typed,
-                    "correct": item.get("dutch", ""),
+                    "correct": correct_answer,
                     "transition": transition,
                     "interval_after": result.get("interval_after", 0),
                     "successes": result.get("successes", 0),
                     "target": result.get("target", current_target),
+                    "verb_tense": verb_exercise.get("tense") if verb_exercise else "",
+                    "verb_subject": verb_exercise.get("subject") if verb_exercise else "",
                 }
 
                 # Real mistakes return after a few other cards. No second server rerun
@@ -1453,7 +1707,7 @@ if page == "Practice":
                 # The current card has now been answered. Persist the following
                 # unfinished card so reopening the app continues from there.
                 next_id = str(queue[idx + 1].get("id")) if idx + 1 < len(queue) else None
-                save_resume_state_async(mode, next_id)
+                save_resume_state_async(mode, next_id, verb_tense)
                 fb = st.session_state.practice_feedback
 
         if fb:
@@ -1479,17 +1733,21 @@ if page == "Practice":
             elif fb.get("grade") == "correct":
                 st.caption(f"Memory strength: {fb.get('successes')}/{fb.get('target')} spaced correct recalls.")
 
-            st.markdown(f"**Dutch:** {html.escape(str(item.get('dutch', '')))}")
-            if item.get("example_nl"):
+            st.markdown(f"**Dutch:** {html.escape(str(fb.get('correct', '')))}")
+            if is_verb_item(item):
+                detail = " · ".join(x for x in [str(item.get("dutch", "")), str(fb.get("verb_tense", "")), str(fb.get("verb_subject", ""))] if x)
+                if detail:
+                    st.caption(detail)
+            elif item.get("example_nl"):
                 st.caption(str(item.get("example_nl")))
-            pronunciation_box(str(item.get("dutch", "")), f"practice-{idx}")
+            pronunciation_box(str(fb.get("correct", "")), f"practice-{idx}")
 
             st.button(
                 "Next →",
                 type="primary",
                 use_container_width=True,
                 on_click=advance_practice,
-                args=(mode,),
+                args=(mode, verb_tense),
             )
 
     usage = usage_display()
@@ -1516,30 +1774,52 @@ elif page == "Generate":
     if not OPENAI_KEY:
         st.warning("Add OPENAI_API_KEY to Streamlit secrets to enable generation.")
     else:
+        generator_kind = st.radio(
+            "Generator",
+            ["Words / phrases / sentences", "Verb conjugation sets"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
         level = st.selectbox("Level", ["A2", "B1", "B2"], index=1)
         topic = st.text_input("Topic", value="everyday Dutch")
-        kinds = st.multiselect(
-            "Include",
-            ["word", "phrase", "sentence"],
-            default=["word", "phrase", "sentence"],
-        )
-        count = st.slider("How many", 3, 20, 8)
-        if st.button("Generate", type="primary"):
-            if not kinds:
-                st.error("Choose at least one item type.")
-            else:
+
+        if generator_kind == "Verb conjugation sets":
+            count = st.slider("How many verbs", 1, 6, 3)
+            st.caption("Each verb becomes one learning item with short sentence drills across present, past and perfect tense.")
+            if st.button("Generate verb sets", type="primary"):
                 try:
-                    with st.spinner("Generating…"):
-                        st.session_state.generated_preview = generate_items(level, topic, count, kinds)
-                    st.success(f"Generated {len(st.session_state.generated_preview)} items. Review them before saving.")
+                    with st.spinner("Generating verb drills…"):
+                        st.session_state.generated_preview = generate_verb_items(level, topic, count)
+                    st.success(f"Generated {len(st.session_state.generated_preview)} verb set(s). Review them before saving.")
                 except Exception as exc:
                     st.error(f"Generation failed: {exc}")
+        else:
+            kinds = st.multiselect(
+                "Include",
+                ["word", "phrase", "sentence"],
+                default=["word", "phrase", "sentence"],
+            )
+            count = st.slider("How many", 3, 20, 8)
+            if st.button("Generate", type="primary"):
+                if not kinds:
+                    st.error("Choose at least one item type.")
+                else:
+                    try:
+                        with st.spinner("Generating…"):
+                            st.session_state.generated_preview = generate_items(level, topic, count, kinds)
+                        st.success(f"Generated {len(st.session_state.generated_preview)} items. Review them before saving.")
+                    except Exception as exc:
+                        st.error(f"Generation failed: {exc}")
 
         preview = st.session_state.get("generated_preview", [])
         if preview:
             chosen_ids = []
             for i, item in enumerate(preview):
-                label = f"{item['item_type'].title()}: {item['dutch']} — {item['english']}"
+                if is_verb_item(item):
+                    n_forms = len(verb_exercises(item, "Mixed"))
+                    label = f"Verb: {item['dutch']} — {item['english']} · {n_forms} sentence drills"
+                else:
+                    label = f"{item['item_type'].title()}: {item['dutch']} — {item['english']}"
                 if st.checkbox(label, value=True, key=f"gen_keep_{i}"):
                     chosen_ids.append(i)
             if st.button("Save selected to trainer", type="primary"):
@@ -1614,7 +1894,7 @@ elif page == "Library":
     state_view = f2.selectbox("Status", ["Active", "Retired", "All"], key="library_status")
 
     f3, f4 = st.columns(2)
-    typ = f3.selectbox("Type", ["all", "word", "phrase", "sentence"], key="library_type")
+    typ = f3.selectbox("Type", ["all", "word", "verb", "phrase", "sentence"], key="library_type")
     level_view = f4.selectbox("Level", ["all", "A1", "A2", "B1", "B2", "C1"], key="library_level")
 
     filtered = []
@@ -1625,7 +1905,11 @@ elif page == "Library":
             continue
         if state_view == "Retired" and active:
             continue
-        if typ != "all" and item.get("item_type") != typ:
+        if typ == "verb" and not is_verb_item(item):
+            continue
+        if typ == "sentence" and (item.get("item_type") != "sentence" or is_verb_item(item)):
+            continue
+        if typ not in {"all", "verb", "sentence"} and item.get("item_type") != typ:
             continue
         if level_view != "all" and item.get("level") != level_view:
             continue
@@ -1662,8 +1946,14 @@ elif page == "Library":
             due = str(p.get("due_on") or "")
             status_label = f"retired · next review {due}" if due else "retired"
         with st.expander(f"{item.get('dutch','')} — {item.get('english','')} · {status_label}"):
-            st.write(f"Type: {item.get('item_type')} · Level: {item.get('level')} · Theme: {item.get('theme')}")
-            if item.get("example_nl"):
+            display_type = "verb" if is_verb_item(item) else item.get("item_type")
+            st.write(f"Type: {display_type} · Level: {item.get('level')} · Theme: {item.get('theme')}")
+            if is_verb_item(item):
+                exs = verb_exercises(item, "Mixed")
+                st.caption(f"{len(exs)} short sentence drills across present, past and perfect tense.")
+                for ex in exs[:3]:
+                    st.write(f"{ex['english']} → {ex['dutch']}")
+            elif item.get("example_nl"):
                 st.write(item["example_nl"])
             pronunciation_box(str(item.get("dutch", "")), f"lib-{item['id']}")
             if not active:
