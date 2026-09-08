@@ -1554,19 +1554,19 @@ def apply_app_css(scale: float) -> None:
             .activity-foot {{ margin-top:2px; text-align:right; }}
           }}
 
-          .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:10px; padding:14px 16px; margin:7px 0 8px; box-shadow:0 3px 10px rgba(75,53,31,.05); text-align:center; }}
+          .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:10px; padding:9px 16px; margin:6px 0 7px; box-shadow:0 3px 10px rgba(75,53,31,.05); text-align:center; }}
           .cue-kicker {{ color:#71583d; letter-spacing:.13em; font-size:{0.64 * scale:.3f}rem; font-weight:700; }}
-          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.45 * scale:.3f}rem; line-height:1.18; margin-top:5px; overflow-wrap:anywhere; }}
+          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.38 * scale:.3f}rem; line-height:1.16; margin:0; overflow-wrap:anywhere; }}
           .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
           .compact-stats {{ color:#62503e; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:5px; }}
           .sync-line {{ color:#695642; text-align:center; font-size:{0.70 * scale:.3f}rem; margin-top:1px; }}
           .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.68rem; margin:-.2rem 0 .12rem; }}
-          .answer-diff {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:9px; padding:6px 9px; margin:4px 0 5px; line-height:1.48; font-size:{0.92 * scale:.3f}rem; }}
-          .diff-label {{ display:inline-block; min-width:4.4rem; color:#62503e; font-size:.82em; font-weight:700; }}
+          .answer-diff {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; line-height:1.62; font-size:{1.04 * scale:.3f}rem; }}
+          .diff-label {{ display:inline-block; min-width:4.8rem; color:#574332; font-size:.86em; font-weight:800; }}
           .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
           .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
-          .distance-line {{ color:#62503e; font-size:.78em; margin-top:2px; }}
-          .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:9px; padding:6px 9px; margin:4px 0 5px; font-size:{0.94 * scale:.3f}rem; line-height:1.48; }}
+          .distance-line {{ color:#62503e; font-size:.82em; margin-top:4px; }}
+          .verb-answer {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; font-size:{1.04 * scale:.3f}rem; line-height:1.62; }}
           .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
           .feedback-heading {{ color:#2d2118; font-size:{1.05 * scale:.3f}rem; line-height:1.15; font-weight:800; margin:4px 0 3px; }}
 
@@ -1586,8 +1586,8 @@ def apply_app_css(scale: float) -> None:
             .trainer-title {{ font-size:{1.65 * scale:.3f}rem; }}
             .trainer-sub {{ font-size:{0.74 * scale:.3f}rem; }}
             .activity-stats {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-            .cue-card {{ padding:12px 10px; }}
-            .cue-text {{ font-size:{1.35 * scale:.3f}rem; }}
+            .cue-card {{ padding:8px 10px; }}
+            .cue-text {{ font-size:{1.28 * scale:.3f}rem; }}
             [data-testid="stRadio"] label p {{ font-size:{0.82 * scale:.3f}rem !important; }}
           }}
         </style>
@@ -2004,8 +2004,7 @@ if page == "Practice":
             unsafe_allow_html=True,
         )
         st.markdown(
-            f'<div class="cue-card"><div class="cue-kicker">SAY IT IN DUTCH</div>'
-            f'<div class="cue-text">{html.escape(cue)}</div></div>',
+            f'<div class="cue-card"><div class="cue-text">{html.escape(cue)}</div></div>',
             unsafe_allow_html=True,
         )
 
