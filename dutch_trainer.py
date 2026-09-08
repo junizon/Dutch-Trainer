@@ -1531,8 +1531,8 @@ def apply_app_css(scale: float) -> None:
           button:disabled {{ opacity:.48 !important; }}
 
           .trainer-kicker {{ color:#c3780a; letter-spacing:.16em; font-size:.64rem; font-weight:800; margin-bottom:.05rem; }}
-          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.85 * scale:.3f}rem; line-height:1.0; margin-bottom:.22rem; }}
-          .trainer-sub {{ color:#62503e; font-size:{0.78 * scale:.3f}rem; margin-bottom:.05rem; }}
+          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.78 * scale:.3f}rem; line-height:1.0; margin-bottom:.12rem; }}
+          .trainer-sub {{ color:#62503e; font-size:{0.76 * scale:.3f}rem; margin-bottom:.02rem; }}
 
           .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #ddcbaa; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(75,53,31,.06); }}
           .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }}
@@ -1583,8 +1583,8 @@ def apply_app_css(scale: float) -> None:
 
           @media (max-width:560px) {{
             .block-container {{ padding-left:.7rem; padding-right:.7rem; padding-top:.45rem; }}
-            .trainer-title {{ font-size:{1.65 * scale:.3f}rem; }}
-            .trainer-sub {{ font-size:{0.74 * scale:.3f}rem; }}
+            .trainer-title {{ font-size:{1.55 * scale:.3f}rem; }}
+            .trainer-sub {{ font-size:{0.70 * scale:.3f}rem; }}
             .activity-stats {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
             .cue-card {{ padding:8px 10px; }}
             .cue-text {{ font-size:{1.28 * scale:.3f}rem; }}
@@ -1870,9 +1870,8 @@ apply_app_css(current_scale)
 # in a dedicated row so Android does not stack A− and A+ into giant buttons.
 st.markdown(
     """
-    <div class="trainer-kicker">OEFENEN</div>
-    <div class="trainer-title">Dutch word trainer</div>
-    <div class="trainer-sub">Words · verbs · phrases · sentences · long-term review</div>
+    <div class="trainer-title">🐱 Dutch word trainer</div>
+    <div class="trainer-sub">June’s own little Dutch practice app</div>
     """,
     unsafe_allow_html=True,
 )
