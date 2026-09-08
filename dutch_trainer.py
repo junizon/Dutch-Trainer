@@ -1047,6 +1047,20 @@ def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, An
     if not OPENAI_KEY or OpenAI is None:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
+    # Avoid repeatedly generating verbs the learner already has. This lookup only
+    # happens when Generate is pressed; it is not part of ordinary practice.
+    existing_lemmas: list[str] = []
+    try:
+        for saved in fetch_items(include_inactive=True):
+            data = verb_data(saved)
+            lemma = str(data.get("lemma", "") if data else "").strip().lower()
+            if lemma:
+                existing_lemmas.append(lemma)
+    except Exception:
+        # Generation should still work if the duplicate-avoidance lookup fails.
+        existing_lemmas = []
+    existing_lemmas = sorted(set(existing_lemmas))[-120:]
+
     client = OpenAI(api_key=OPENAI_KEY)
     exercise_schema = {
         "type": "object",
@@ -1081,18 +1095,59 @@ def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, An
         "additionalProperties": False,
     }
 
+    existing_note = ", ".join(existing_lemmas) if existing_lemmas else "none yet"
+
+    if level == "A2":
+        level_guidance = """
+Choose useful A2 verbs for ordinary daily life. A mixture of common regular, irregular,
+modal and separable verbs is appropriate. Keep the vocabulary clearly A2 rather than B1/B2.
+""".strip()
+    elif level == "B1":
+        level_guidance = """
+Treat B1 as genuinely intermediate. Prefer productive verbs such as separable, reflexive,
+irregular and practical workplace/social verbs that an A2 learner may not yet control well.
+Do NOT fill the batch with elementary A1/A2 verbs. Unless the requested topic truly requires
+them, avoid: zijn, hebben, doen, gaan, komen, zien, zeggen, maken, willen, kunnen, moeten,
+mogen, eten, drinken, werken, wonen, bellen, kopen, slapen. At most ONE very basic verb may
+appear in the whole batch. Favour verbs with useful collocations and sentence patterns.
+""".strip()
+    else:  # B2
+        level_guidance = """
+Treat B2 as upper-intermediate. Select nuanced, less elementary verbs useful for work,
+discussion, planning, judgement, relationships and abstract everyday topics. Prefer verbs
+with richer collocations, separable/reflexive constructions and irregular forms where natural.
+Exclude elementary stand-alone verbs such as zijn, hebben, doen, gaan, komen, zien, zeggen,
+maken, willen, kunnen, moeten, mogen, eten, drinken, werken, wonen, bellen, kopen, slapen.
+Do not choose a verb merely because it is high frequency; choose verbs that give a B2 learner
+meaningful conjugation and usage practice.
+""".strip()
+
     prompt = f"""
 Create exactly {count} useful Dutch verb-conjugation drill sets for an adult learner at CEFR {level}.
 Topic/context preference: {topic or 'everyday Dutch'}.
+
+LEVEL SELECTION RULES:
+{level_guidance}
+
+VERBS ALREADY IN THIS LEARNER'S TRAINER (do not generate these again):
+{existing_note}
+
+Batch-quality rules:
+- Use {count} DISTINCT infinitives.
+- Spread them across different meanings and contexts instead of giving near-synonyms.
+- Match the selected CEFR level strictly. The level refers to the VERB and its natural usage,
+  not merely to sentence length.
+- Prefer verbs that are genuinely useful in contemporary Netherlands Dutch.
 
 For EACH verb:
 - Give the Dutch infinitive and a concise English meaning.
 - Create exactly 15 SHORT, natural sentence drills: 5 present, 5 simple past, 5 perfect tense.
 - Across each tense, vary the grammatical subjects: ik, jij/je, hij/zij/het, wij/we, jullie/zij where natural.
-- Keep sentences practical and generally 3-9 words.
+- Keep sentences practical and generally 3-9 words, but let B1/B2 sentences contain the
+  prepositions, particles and complements needed to show how the verb is actually used.
 - The English sentence is the cue; the learner must type the complete Dutch sentence.
 - Use contemporary Netherlands Dutch.
-- Include irregular, separable and modal verbs when appropriate for the level/topic, but do not make every set difficult.
+- Include irregular, separable, reflexive and modal verbs when appropriate for the selected level/topic.
 - In perfect tense, use the correct auxiliary and past participle.
 - accepted_answers may contain only genuinely equivalent Dutch variants (for example je/jij when both are natural), not loose paraphrases.
 - Avoid duplicate sentence patterns inside a verb set.
@@ -1784,8 +1839,18 @@ elif page == "Generate":
         topic = st.text_input("Topic", value="everyday Dutch")
 
         if generator_kind == "Verb conjugation sets":
-            count = st.slider("How many verbs", 1, 6, 3)
-            st.caption("Each verb becomes one learning item with short sentence drills across present, past and perfect tense.")
+            count = st.select_slider(
+                "How many verbs",
+                options=[5, 10, 15, 20],
+                value=5,
+                help="Each verb creates 15 short sentence drills, so larger batches take longer to generate.",
+            )
+            if level == "B1":
+                st.caption("B1 generation favours genuinely intermediate verbs and limits elementary A1/A2 verbs. Each verb gets present, past and perfect sentence drills.")
+            elif level == "B2":
+                st.caption("B2 generation deliberately avoids elementary verbs and favours richer, less basic usage. Each verb gets present, past and perfect sentence drills.")
+            else:
+                st.caption("Each verb becomes one learning item with short sentence drills across present, past and perfect tense.")
             if st.button("Generate verb sets", type="primary"):
                 try:
                     with st.spinner("Generating verb drills…"):
