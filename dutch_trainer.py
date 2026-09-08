@@ -1468,13 +1468,13 @@ def pronunciation_box(text: str, key: str, show_forvo: bool = False) -> None:
     forvo = f"https://forvo.com/search/{quote(text, safe='')}/nl/"
     forvo_link = (
         f'<a href="{forvo}" target="_blank" rel="noopener" '
-        'style="font:700 13px system-ui;color:#4f3c2d;text-decoration:none;white-space:nowrap;">Forvo ↗</a>'
+        'style="font:600 13px -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#4f3c2d;text-decoration:none;white-space:nowrap;">Forvo ↗</a>'
         if show_forvo else ""
     )
     block = f"""
     <div style="display:flex;gap:9px;align-items:center;flex-wrap:nowrap;margin:0;">
       <button id="speak-{key}" style="
-        font:700 14px system-ui;
+        font:600 14px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
         padding:8px 12px;
         min-height:42px;
         border-radius:10px;
@@ -1582,8 +1582,19 @@ def apply_app_css(scale: float) -> None:
           button[kind="secondary"] p, button[kind="primary"] p {{ color:inherit !important; -webkit-text-fill-color:inherit !important; }}
           button:disabled {{ opacity:.48 !important; }}
 
-          .trainer-kicker {{ color:#c3780a; letter-spacing:.16em; font-size:.64rem; font-weight:800; margin-bottom:.05rem; }}
-          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.78 * scale:.3f}rem; line-height:1.0; margin-bottom:.12rem; }}
+          /* Typography: native UI sans for controls/body, refined system serif
+             for the title and learning prompt. No external font download needed. */
+          .stApp,
+          .stApp button,
+          .stApp input,
+          .stApp textarea,
+          .stApp select {{
+            font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                        Helvetica, Arial, sans-serif !important;
+          }}
+
+          .trainer-kicker {{ color:#c3780a; letter-spacing:.16em; font-size:.64rem; font-weight:700; margin-bottom:.05rem; }}
+          .trainer-title {{ color:#2d2118; font-family:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif; font-size:{1.78 * scale:.3f}rem; line-height:1.02; font-weight:600; letter-spacing:-.015em; margin-bottom:.12rem; }}
           .trainer-sub {{ color:#62503e; font-size:{0.76 * scale:.3f}rem; margin-bottom:.02rem; }}
 
           .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #ddcbaa; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(75,53,31,.06); }}
@@ -1608,24 +1619,24 @@ def apply_app_css(scale: float) -> None:
 
           .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:10px; padding:9px 16px; margin:6px 0 7px; box-shadow:0 3px 10px rgba(75,53,31,.05); text-align:center; }}
           .cue-kicker {{ color:#71583d; letter-spacing:.13em; font-size:{0.64 * scale:.3f}rem; font-weight:700; }}
-          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.38 * scale:.3f}rem; line-height:1.16; margin:0; overflow-wrap:anywhere; }}
+          .cue-text {{ color:#2d2118; font-family:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif; font-size:{1.38 * scale:.3f}rem; line-height:1.18; font-weight:500; letter-spacing:-.008em; margin:0; overflow-wrap:anywhere; }}
           .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
           .compact-stats {{ color:#62503e; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:5px; }}
           .sync-line {{ color:#695642; text-align:center; font-size:{0.70 * scale:.3f}rem; margin-top:1px; }}
           .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.68rem; margin:-.2rem 0 .12rem; }}
           .answer-diff {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; line-height:1.58; font-size:{1.10 * scale:.3f}rem; }}
-          .diff-label {{ display:inline-block; min-width:4.8rem; color:#574332; font-size:.86em; font-weight:800; }}
+          .diff-label {{ display:inline-block; min-width:4.8rem; color:#574332; font-size:.86em; font-weight:700; }}
           .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
-          .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
+          .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:600; }}
           .distance-line {{ color:#62503e; font-size:.82em; margin-top:4px; }}
           .verb-answer {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; font-size:{1.12 * scale:.3f}rem; line-height:1.55; }}
-          .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
-          .feedback-heading {{ color:#2d2118; font-size:{1.05 * scale:.3f}rem; line-height:1.15; font-weight:800; margin:4px 0 3px; }}
+          .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:700; }}
+          .feedback-heading {{ color:#2d2118; font-size:{1.05 * scale:.3f}rem; line-height:1.15; font-weight:700; margin:4px 0 3px; }}
           .answer-line {{ color:#2d2118; font-size:{1.16 * scale:.3f}rem; line-height:1.42; margin:3px 0 4px; }}
-          .answer-line .answer-prefix {{ color:#574332; font-size:.82em; font-weight:800; margin-right:.35rem; }}
+          .answer-line .answer-prefix {{ color:#574332; font-size:.82em; font-weight:700; margin-right:.35rem; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.00 * scale:.3f}rem !important; }}
-          .stButton button, .stFormSubmitButton button {{ font-size:{0.92 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.5rem; }}
+          .stButton button, .stFormSubmitButton button {{ font-size:{0.92 * scale:.3f}rem !important; font-weight:600 !important; border-radius:10px !important; min-height:2.5rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
           .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#62503e !important; font-size:{0.80 * scale:.3f}rem !important; }}
