@@ -272,6 +272,167 @@ def normalize(s: str) -> str:
     return s
 
 
+
+def levenshtein_distance(a: str, b: str) -> int:
+    """Exact Levenshtein edit distance (insert/delete/substitute = 1)."""
+    a = normalize(a)
+    b = normalize(b)
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            cur.append(min(
+                cur[-1] + 1,          # insertion
+                prev[j] + 1,          # deletion
+                prev[j - 1] + (ca != cb),  # substitution
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def raw_answer_variants(correct_answer: str, accepted_answers: Any) -> list[str]:
+    vals = [str(correct_answer or "").strip()]
+    extra = accepted_answers or []
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = []
+    if isinstance(extra, list):
+        vals.extend(str(x).strip() for x in extra if str(x).strip())
+    # Keep order but remove duplicate normalized variants.
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in vals:
+        key = normalize(value)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def closest_answer_variant(correct_answer: str, accepted_answers: Any, typed: str) -> str:
+    """Compare feedback with the acceptable answer nearest to what the learner typed."""
+    variants = raw_answer_variants(correct_answer, accepted_answers)
+    if not variants:
+        return str(correct_answer or "")
+    mine = normalize(typed)
+    return min(
+        variants,
+        key=lambda v: (
+            levenshtein_distance(mine, normalize(v)),
+            -SequenceMatcher(None, mine, normalize(v)).ratio(),
+        ),
+    )
+
+
+def _word_tokens(raw: str) -> list[str]:
+    """Words only: punctuation/capitalization are deliberately ignored by checking."""
+    return re.findall(r"[^\W_]+(?:['’][^\W_]+)?", str(raw or ""), flags=re.UNICODE)
+
+
+def _char_diff_pair(mine: str, expected: str) -> tuple[str, str]:
+    """HTML for two words, highlighting only differing character spans."""
+    a = list(mine)
+    b = list(expected)
+    sm = SequenceMatcher(None, [x.lower() for x in a], [x.lower() for x in b])
+    mine_bits: list[str] = []
+    exp_bits: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        aa = html.escape("".join(a[i1:i2]))
+        bb = html.escape("".join(b[j1:j2]))
+        if tag == "equal":
+            mine_bits.append(aa)
+            exp_bits.append(bb)
+        else:
+            if aa:
+                mine_bits.append(f'<span class="diff-wrong">{aa}</span>')
+            if bb:
+                exp_bits.append(f'<span class="diff-right">{bb}</span>')
+    return "".join(mine_bits), "".join(exp_bits)
+
+
+def sentence_diff_html(typed: str, expected: str) -> str:
+    """Word-aware diff for phrases/sentences; replacements get character-level detail."""
+    mine_words = _word_tokens(typed)
+    exp_words = _word_tokens(expected)
+    mine_norm = [w.lower().replace("’", "'") for w in mine_words]
+    exp_norm = [w.lower().replace("’", "'") for w in exp_words]
+    sm = SequenceMatcher(None, mine_norm, exp_norm)
+
+    mine_out: list[str] = []
+    exp_out: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        left = mine_words[i1:i2]
+        right = exp_words[j1:j2]
+
+        if tag == "equal":
+            mine_out.extend(html.escape(w) for w in left)
+            exp_out.extend(html.escape(w) for w in right)
+        elif tag == "replace" and len(left) == len(right):
+            for lw, rw in zip(left, right):
+                lhtml, rhtml = _char_diff_pair(lw, rw)
+                mine_out.append(lhtml)
+                exp_out.append(rhtml)
+        else:
+            mine_out.extend(f'<span class="diff-wrong">{html.escape(w)}</span>' for w in left)
+            exp_out.extend(f'<span class="diff-right">{html.escape(w)}</span>' for w in right)
+
+    mine_line = " ".join(mine_out) if mine_out else "—"
+    exp_line = " ".join(exp_out) if exp_out else "—"
+    return (
+        '<div class="answer-diff">'
+        f'<div><span class="diff-label">You:</span> {mine_line}</div>'
+        f'<div><span class="diff-label">Answer:</span> {exp_line}</div>'
+        '</div>'
+    )
+
+
+def word_diff_html(typed: str, expected: str) -> str:
+    """Character-level word diff plus the exact Levenshtein distance."""
+    mine = normalize(typed)
+    exp = normalize(expected)
+    mine_html, exp_html = _char_diff_pair(mine, exp)
+    distance = levenshtein_distance(mine, exp)
+    return (
+        '<div class="answer-diff">'
+        f'<div><span class="diff-label">You:</span> {mine_html or "—"}</div>'
+        f'<div><span class="diff-label">Answer:</span> {exp_html or "—"}</div>'
+        f'<div class="distance-line">Levenshtein distance: <strong>{distance}</strong></div>'
+        '</div>'
+    )
+
+
+def highlight_verb_html(sentence: str, verb_parts: Any) -> str:
+    """Highlight exact verb-expression parts supplied by the verb generator."""
+    raw = str(sentence or "")
+    parts = verb_parts if isinstance(verb_parts, list) else []
+    clean = [str(p).strip() for p in parts if str(p).strip()]
+    if not clean:
+        return html.escape(raw)
+
+    # Longest first avoids highlighting a short part inside a longer one.
+    pattern = re.compile(
+        "(" + "|".join(re.escape(p) for p in sorted(set(clean), key=len, reverse=True)) + ")",
+        flags=re.IGNORECASE,
+    )
+    pieces = pattern.split(raw)
+    targets = {p.lower() for p in clean}
+    return "".join(
+        f'<span class="verb-highlight">{html.escape(piece)}</span>'
+        if piece.lower() in targets
+        else html.escape(piece)
+        for piece in pieces
+        if piece != ""
+    )
+
+
 def answer_variants(item: dict[str, Any]) -> list[str]:
     vals = [item.get("dutch", "")]
     extra = item.get("accepted_answers") or []
@@ -359,6 +520,7 @@ def verb_exercises(item: dict[str, Any], tense: str = "Mixed") -> list[dict[str,
             "tense": ex_tense,
             "subject": str(ex.get("subject", "")).strip(),
             "accepted_answers": ex.get("accepted_answers") or [],
+            "verb_parts": ex.get("verb_parts") or [],
         })
 
     if tense != "Mixed":
@@ -1070,8 +1232,9 @@ def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, An
             "english": {"type": "string"},
             "dutch": {"type": "string"},
             "accepted_answers": {"type": "array", "items": {"type": "string"}},
+            "verb_parts": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["tense", "subject", "english", "dutch", "accepted_answers"],
+        "required": ["tense", "subject", "english", "dutch", "accepted_answers", "verb_parts"],
         "additionalProperties": False,
     }
     schema = {
@@ -1150,6 +1313,10 @@ For EACH verb:
 - Include irregular, separable, reflexive and modal verbs when appropriate for the selected level/topic.
 - In perfect tense, use the correct auxiliary and past participle.
 - accepted_answers may contain only genuinely equivalent Dutch variants (for example je/jij when both are natural), not loose paraphrases.
+- verb_parts must contain the exact word(s) or separated part(s) in the Dutch sentence that realise the TARGET verb expression.
+  Examples: for "Ik sta om zeven uur op." with opstaan, use ["sta", "op"]; for "We hebben veel gewerkt." with werken,
+  use ["hebben", "gewerkt"]; for a reflexive target, include the reflexive pronoun when it is part of the learned expression.
+  Copy each part exactly as it appears in the Dutch sentence.
 - Avoid duplicate sentence patterns inside a verb set.
 - Do not include Chinese.
 """.strip()
@@ -1190,6 +1357,7 @@ For EACH verb:
                 "english": ex_en,
                 "dutch": ex_nl,
                 "accepted_answers": ex.get("accepted_answers") or [],
+                "verb_parts": ex.get("verb_parts") or [],
             })
         # A verb set must contain enough varied material to support the 5-recall rule.
         if len(valid) < 10:
@@ -1380,6 +1548,13 @@ def apply_app_css(scale: float) -> None:
           .compact-stats {{ color:#806f59; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
           .sync-line {{ color:#897761; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
           .keyboard-hint {{ color:#95836d; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
+          .answer-diff {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; line-height:1.8; font-size:{0.98 * scale:.3f}rem; }}
+          .diff-label {{ display:inline-block; min-width:4.4rem; color:#806f59; font-size:.82em; font-weight:700; }}
+          .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
+          .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
+          .distance-line {{ color:#806f59; font-size:.78em; margin-top:2px; }}
+          .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; font-size:{1.02 * scale:.3f}rem; line-height:1.7; }}
+          .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.05 * scale:.3f}rem !important; }}
           .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
@@ -1784,16 +1959,19 @@ if page == "Practice":
                         item["_verb_retry_exercise"] = verb_exercise
                     else:
                         item.pop("_verb_retry_exercise", None)
+                nearest_answer = closest_answer_variant(correct_answer, accepted_answers, typed)
                 st.session_state.practice_feedback = {
                     "grade": grade,
                     "typed": typed,
                     "correct": correct_answer,
+                    "nearest": nearest_answer,
                     "transition": transition,
                     "interval_after": result.get("interval_after", 0),
                     "successes": result.get("successes", 0),
                     "target": result.get("target", current_target),
                     "verb_tense": verb_exercise.get("tense") if verb_exercise else "",
                     "verb_subject": verb_exercise.get("subject") if verb_exercise else "",
+                    "verb_parts": verb_exercise.get("verb_parts") if verb_exercise else [],
                 }
 
                 # Real mistakes return after a few other cards. No second server rerun
@@ -1850,13 +2028,52 @@ if page == "Practice":
             elif fb.get("grade") == "correct":
                 st.caption(f"Memory strength: {fb.get('successes')}/{fb.get('target')} spaced correct recalls.")
 
-            st.markdown(f"**Dutch:** {html.escape(str(fb.get('correct', '')))}")
+            typed_answer = str(fb.get("typed", "") or "")
+            expected_answer = str(fb.get("nearest") or fb.get("correct", "") or "")
+
+            # Wrong/typo feedback shows exactly where the answer diverged.
+            if fb.get("grade") in {"wrong", "typo"} and typed_answer.strip():
+                if (not is_verb_item(item)) and str(item.get("item_type", "")) == "word":
+                    st.markdown(
+                        word_diff_html(typed_answer, expected_answer),
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        sentence_diff_html(typed_answer, expected_answer),
+                        unsafe_allow_html=True,
+                    )
+
+            # Verb drills also show the target verb expression highlighted in the
+            # correct sentence. Newly generated verb sets carry exact verb_parts.
+            # Older saved verb sets did not store those spans, so they fall back
+            # gracefully to the unhighlighted sentence.
             if is_verb_item(item):
-                detail = " · ".join(x for x in [str(item.get("dutch", "")), str(fb.get("verb_tense", "")), str(fb.get("verb_subject", ""))] if x)
+                rendered = highlight_verb_html(
+                    str(fb.get("correct", "")),
+                    fb.get("verb_parts") or [],
+                )
+                st.markdown(
+                    f'<div class="verb-answer"><span class="diff-label">Dutch:</span> {rendered}</div>',
+                    unsafe_allow_html=True,
+                )
+                detail = " · ".join(
+                    x for x in [
+                        str(item.get("dutch", "")),
+                        str(fb.get("verb_tense", "")),
+                        str(fb.get("verb_subject", "")),
+                    ]
+                    if x
+                )
                 if detail:
                     st.caption(detail)
+            elif fb.get("grade") not in {"wrong", "typo"}:
+                st.markdown(f"**Dutch:** {html.escape(str(fb.get('correct', '')))}")
+                if item.get("example_nl"):
+                    st.caption(str(item.get("example_nl")))
             elif item.get("example_nl"):
                 st.caption(str(item.get("example_nl")))
+
             pronunciation_box(str(fb.get("correct", "")), f"practice-{idx}")
 
 
