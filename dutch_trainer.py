@@ -634,19 +634,25 @@ def schedule_after(
                 status = "familiar" if successes >= max(2, target - 2) else "learning"
         elif grade == "typo":
             typo += 1
-            after = max(1, min(before or 2, 3))
+            # A typo is not a clean recall, so keep it available today rather
+            # than making it disappear until a future date.
+            after = 0
             status = "familiar" if successes >= max(2, target - 2) else "learning"
         elif grade == "dont_know":
             dont += 1
             successes = 0
             difficulty += 2
-            after = 1
+            # Not-known items stay due today. They may reappear later in the
+            # current session, and if the app is closed they are still waiting
+            # when the learner comes back.
+            after = 0
             status = "learning"
         else:
             wrong += 1
             successes = 0
             difficulty += 1
-            after = 1
+            # Wrong answers stay due today for the same reason.
+            after = 0
             status = "learning"
 
     values = {
@@ -1870,7 +1876,7 @@ apply_app_css(current_scale)
 # in a dedicated row so Android does not stack A− and A+ into giant buttons.
 st.markdown(
     """
-    <div class="trainer-title">🐱 Dutch word trainer</div>
+    <div class="trainer-title">🐈 Dutch word trainer</div>
     <div class="trainer-sub">June’s own little Dutch practice app</div>
     """,
     unsafe_allow_html=True,
@@ -2073,6 +2079,9 @@ if page == "Practice":
                 # is forced here; feedback renders immediately in this same run.
                 if grade in {"wrong", "dont_know"}:
                     insert_at = min(len(queue), idx + 4)
+                    queue.insert(insert_at, item)
+                elif grade == "typo":
+                    insert_at = min(len(queue), idx + 7)
                     queue.insert(insert_at, item)
                 elif transition in {"retire", "retired_pass", "retired_typo"}:
                     queue = queue[:idx + 1] + [
