@@ -202,6 +202,31 @@ def set_setting(key: str, value: Any) -> None:
     _settings_cache()[key] = value
 
 
+def set_setting_async(key: str, value: Any) -> None:
+    """Update the local settings cache now and save to Supabase in the background."""
+    _settings_cache()[key] = value
+    future = SYNC_WRITER.submit(
+        supa_post,
+        "trainer_settings",
+        [{"key": key, "value": value}],
+        True,
+        False,
+    )
+    _pending_syncs().append(future)
+
+
+def save_resume_state_async(mode: str, item_id: str | None) -> None:
+    """Remember the next unfinished practice item across browser/app sessions."""
+    rows = [
+        {"key": "practice_resume_mode", "value": mode},
+        {"key": "practice_resume_item_id", "value": item_id or ""},
+    ]
+    _settings_cache()["practice_resume_mode"] = mode
+    _settings_cache()["practice_resume_item_id"] = item_id or ""
+    future = SYNC_WRITER.submit(supa_post, "trainer_settings", rows, True, False)
+    _pending_syncs().append(future)
+
+
 def mastery_target() -> int:
     try:
         value = int(get_setting("mastery_target", 5))
@@ -1019,17 +1044,47 @@ def apply_app_css(scale: float) -> None:
     st.markdown(
         f"""
         <style>
-          :root {{ --trainer-scale: {scale}; }}
-          .stApp {{ background:#f5f8fb; }}
-          .block-container {{ max-width:760px; padding-top:1.25rem; padding-bottom:2.5rem; }}
+          :root {{ --trainer-scale: {scale}; color-scheme:light !important; }}
+          html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+            color-scheme:light !important;
+          }}
+          .stApp {{ background:#f5f8fb; color:#173a68 !important; }}
+          .block-container {{ max-width:760px; padding-top:1.05rem; padding-bottom:2.5rem; }}
           #MainMenu, footer {{ visibility:hidden; }}
           header[data-testid="stHeader"] {{ background:transparent; }}
+
+          /* Android may inherit Streamlit's dark widget palette even though this app
+             deliberately uses a light background. Force readable widget colours. */
+          [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+          [data-testid="stRadio"] label, [data-testid="stRadio"] label p,
+          [data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {{
+            color:#426b98 !important; -webkit-text-fill-color:#426b98 !important;
+          }}
+          [data-testid="stRadio"] svg {{ color:#4773a6 !important; }}
+          [data-baseweb="input"], [data-baseweb="textarea"],
+          .stTextInput input, .stTextArea textarea {{
+            background:#ffffff !important; color:#173a68 !important;
+            -webkit-text-fill-color:#173a68 !important;
+          }}
+          .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
+            color:#9aaabd !important; -webkit-text-fill-color:#9aaabd !important; opacity:1 !important;
+          }}
+          button[kind="secondary"] {{
+            background:#ffffff !important; color:#426b98 !important;
+            border-color:#cbd9e8 !important;
+          }}
+          button[kind="primary"] {{
+            background:#173a68 !important; color:#ffffff !important;
+            border-color:#173a68 !important;
+          }}
+          button[kind="secondary"] p, button[kind="primary"] p {{ color:inherit !important; -webkit-text-fill-color:inherit !important; }}
+          button:disabled {{ opacity:.48 !important; }}
 
           .trainer-kicker {{ color:#4773a6; letter-spacing:.18em; font-size:.78rem; font-weight:800; margin-bottom:.15rem; }}
           .trainer-title {{ color:#173a68; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
           .trainer-sub {{ color:#6c829e; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
 
-          .activity-card {{ background:rgba(255,255,255,.78); border:1px solid #d9e3ef; border-radius:18px; padding:14px 16px; margin:8px 0 14px; box-shadow:0 5px 18px rgba(44,77,116,.06); }}
+          .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #d9e3ef; border-radius:18px; padding:14px 16px; margin:8px 0 14px; box-shadow:0 5px 18px rgba(44,77,116,.06); }}
           .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }}
           .streak-pill {{ border:1px solid #f0cda9; background:#fff7ef; color:#c96f18; border-radius:999px; padding:7px 13px; font-size:{0.90 * scale:.3f}rem; letter-spacing:.05em; }}
           .trainer-dots {{ display:flex; gap:7px; align-items:center; }}
@@ -1050,19 +1105,26 @@ def apply_app_css(scale: float) -> None:
           .stage-line {{ color:#66819f; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
           .compact-stats {{ color:#65809e; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
           .sync-line {{ color:#7890a8; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
+          .keyboard-hint {{ color:#8297ae; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.05 * scale:.3f}rem !important; }}
           .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
-          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ font-size:{0.80 * scale:.3f}rem !important; }}
+          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#7088a3 !important; font-size:{0.80 * scale:.3f}rem !important; }}
+
+          /* Keep the small A− / A+ controls in one row on narrow Android screens. */
+          .st-key-font_controls [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center !important; }}
+          .st-key-font_controls [data-testid="stColumn"] {{ min-width:0 !important; width:auto !important; }}
 
           @media (max-width:560px) {{
-            .block-container {{ padding-left:.7rem; padding-right:.7rem; }}
-            .trainer-title {{ font-size:{2.25 * scale:.3f}rem; }}
+            .block-container {{ padding-left:.7rem; padding-right:.7rem; padding-top:.8rem; }}
+            .trainer-title {{ font-size:{2.15 * scale:.3f}rem; }}
+            .trainer-sub {{ font-size:{0.88 * scale:.3f}rem; }}
             .activity-stats {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-            .cue-card {{ padding:24px 12px; }}
-            .cue-text {{ font-size:{1.80 * scale:.3f}rem; }}
+            .cue-card {{ padding:22px 12px; }}
+            .cue-text {{ font-size:{1.75 * scale:.3f}rem; }}
+            [data-testid="stRadio"] label p {{ font-size:{0.82 * scale:.3f}rem !important; }}
           }}
         </style>
         """,
@@ -1080,11 +1142,84 @@ def practice_type_set(mode: str) -> set[str] | None:
 
 def load_practice(mode: str) -> None:
     queue, stats = practice_candidates(40, practice_type_set(mode))
+
+    # Resume at the last unfinished card if it is still due and still belongs to
+    # this practice mode. The remainder of the queue can be rebuilt safely:
+    # already answered cards have their next due date in Supabase and therefore
+    # do not suddenly reappear when the app is reopened.
+    saved_mode = str(get_setting("practice_resume_mode", mode) or mode)
+    saved_item_id = str(get_setting("practice_resume_item_id", "") or "")
+    if saved_mode == mode and saved_item_id:
+        for pos, queued in enumerate(queue):
+            if str(queued.get("id")) == saved_item_id:
+                queue = queue[pos:] + queue[:pos]
+                break
+
     st.session_state.practice_queue = queue
     st.session_state.practice_stats = stats
     st.session_state.practice_index = 0
     st.session_state.practice_feedback = None
     st.session_state.practice_loaded_mode = mode
+    next_id = str(queue[0].get("id")) if queue else None
+    save_resume_state_async(mode, next_id)
+
+
+def advance_practice(mode: str) -> None:
+    """Advance before the rerun so clicking Next needs only one Streamlit pass."""
+    queue = st.session_state.get("practice_queue", [])
+    idx = int(st.session_state.get("practice_index", 0)) + 1
+    st.session_state.practice_index = idx
+    st.session_state.practice_feedback = None
+    next_id = str(queue[idx].get("id")) if idx < len(queue) else None
+    save_resume_state_async(mode, next_id)
+
+
+def install_keyboard_shortcuts() -> None:
+    """Laptop shortcuts without changing the phone UI.
+
+    Enter inside the answer form is handled natively by Streamlit and submits
+    the first form button (Check). This tiny browser-side listener adds Escape
+    for “I don't know” and Enter for “Next” only when those buttons are visible.
+    """
+    components.html(
+        """
+        <script>
+        (() => {
+          try {
+            const w = window.parent;
+            const d = w.document;
+            if (w.__dutchTrainerShortcutHandler) return;
+            const visibleButton = (label) => Array.from(d.querySelectorAll('button')).find((b) => {
+              const text = (b.innerText || '').trim();
+              const visible = !!(b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+              return visible && text === label && !b.disabled;
+            });
+            w.__dutchTrainerShortcutHandler = (e) => {
+              if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+              const active = d.activeElement;
+              const tag = active && active.tagName ? active.tagName.toLowerCase() : '';
+              if (e.key === 'Escape') {
+                const btn = visibleButton("I don't know");
+                if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
+                return;
+              }
+              if (e.key === 'Enter') {
+                // While typing, let the Streamlit form submit Check normally.
+                if (tag === 'input' || tag === 'textarea' || tag === 'button') return;
+                const btn = visibleButton('Next →') || visibleButton('Next');
+                if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
+              }
+            };
+            d.addEventListener('keydown', w.__dutchTrainerShortcutHandler, true);
+          } catch (err) {
+            // Keyboard shortcuts are optional; the visible buttons always remain.
+          }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 require_password()
@@ -1120,27 +1255,28 @@ if not st.session_state.get("scheduler_migration_checked"):
 current_scale = font_scale()
 apply_app_css(current_scale)
 
-# Header + font-size controls.
-h1, h2 = st.columns([5.2, 1.35], vertical_alignment="top")
-with h1:
-    st.markdown(
-        """
-        <div class="trainer-kicker">OEFENEN</div>
-        <div class="trainer-title">Dutch word trainer</div>
-        <div class="trainer-sub">Words · phrases · sentences · long-term review</div>
-        """,
-        unsafe_allow_html=True,
-    )
-with h2:
-    a1, a2 = st.columns(2)
-    scales = [0.90, 1.00, 1.15, 1.30]
-    scale_idx = min(range(len(scales)), key=lambda i: abs(scales[i] - current_scale))
-    if a1.button("A−", key="font_minus", use_container_width=True, disabled=scale_idx == 0):
-        set_setting("font_scale", scales[max(0, scale_idx - 1)])
-        st.rerun()
-    if a2.button("A+", key="font_plus", use_container_width=True, disabled=scale_idx == len(scales) - 1):
-        set_setting("font_scale", scales[min(len(scales) - 1, scale_idx + 1)])
-        st.rerun()
+# Header + font-size controls. Keep the title simple, then place the controls
+# in a dedicated row so Android does not stack A− and A+ into giant buttons.
+st.markdown(
+    """
+    <div class="trainer-kicker">OEFENEN</div>
+    <div class="trainer-title">Dutch word trainer</div>
+    <div class="trainer-sub">Words · phrases · sentences · long-term review</div>
+    """,
+    unsafe_allow_html=True,
+)
+scales = [0.90, 1.00, 1.15, 1.30]
+scale_idx = min(range(len(scales)), key=lambda i: abs(scales[i] - current_scale))
+with st.container(key="font_controls"):
+    spacer, a1, a2 = st.columns([7, 1, 1], gap="small")
+    with a1:
+        if st.button("A−", key="font_minus", use_container_width=True, disabled=scale_idx == 0):
+            set_setting("font_scale", scales[max(0, scale_idx - 1)])
+            st.rerun()
+    with a2:
+        if st.button("A+", key="font_plus", use_container_width=True, disabled=scale_idx == len(scales) - 1):
+            set_setting("font_scale", scales[min(len(scales) - 1, scale_idx + 1)])
+            st.rerun()
 
 # Radio navigation is intentionally conditional instead of st.tabs. Streamlit
 # executes every tab body on each rerun; that was causing unnecessary Supabase
@@ -1171,10 +1307,16 @@ if st.session_state.get("scheduler_migration_note"):
 # Practice --------------------------------------------------------------------
 if page == "Practice":
     current_target = mastery_target()
+    install_keyboard_shortcuts()
+
+    mode_options = ["Everything", "Words", "Phrases", "Sentences"]
+    if "practice_mode" not in st.session_state:
+        saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
+        st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
 
     mode = st.radio(
         "Practise",
-        ["Everything", "Words", "Phrases", "Sentences"],
+        mode_options,
         horizontal=True,
         label_visibility="collapsed",
         key="practice_mode",
@@ -1200,6 +1342,10 @@ if page == "Practice":
     st.caption(
         "Only one clean recall per calendar day advances mastery. Retired items return after "
         "45 → 90 → 180 → 365 days; if you forget one, it returns to learning."
+    )
+    st.markdown(
+        "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
+        unsafe_allow_html=True,
     )
 
     if "practice_queue" not in st.session_state:
@@ -1291,6 +1437,10 @@ if page == "Practice":
                         q for q in queue[idx + 1:] if str(q.get("id")) != str(item.get("id"))
                     ]
                 st.session_state.practice_queue = queue
+                # The current card has now been answered. Persist the following
+                # unfinished card so reopening the app continues from there.
+                next_id = str(queue[idx + 1].get("id")) if idx + 1 < len(queue) else None
+                save_resume_state_async(mode, next_id)
                 fb = st.session_state.practice_feedback
 
         if fb:
@@ -1321,10 +1471,13 @@ if page == "Practice":
                 st.caption(str(item.get("example_nl")))
             pronunciation_box(str(item.get("dutch", "")), f"practice-{idx}")
 
-            if st.button("Next →", type="primary", use_container_width=True):
-                st.session_state.practice_index = idx + 1
-                st.session_state.practice_feedback = None
-                st.rerun()
+            st.button(
+                "Next →",
+                type="primary",
+                use_container_width=True,
+                on_click=advance_practice,
+                args=(mode,),
+            )
 
     usage = usage_display()
     pending_n, _ = drain_pending_syncs()
