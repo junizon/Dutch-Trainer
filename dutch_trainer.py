@@ -1715,6 +1715,122 @@ def install_keyboard_shortcuts() -> None:
     )
 
 
+def autofocus_answer_input() -> None:
+    """Put the cursor in the Dutch answer field on laptop/desktop.
+
+    On touch-first devices we deliberately do not autofocus, because doing so
+    would pop open the phone keyboard every time a new card appears.
+    """
+    components.html(
+        """
+        <script>
+        (() => {
+          try {
+            const w = window.parent;
+            const d = w.document;
+            if (!w.matchMedia || !w.matchMedia('(pointer: fine)').matches) return;
+
+            const focusAnswer = () => {
+              const inputs = Array.from(d.querySelectorAll('input[type="text"]'));
+              const target = inputs.find((el) => {
+                const p = (el.getAttribute('placeholder') || '').toLowerCase();
+                const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                return visible && p.includes('dutch') && !el.disabled;
+              });
+              if (target && d.activeElement !== target) {
+                target.focus({preventScroll: true});
+                const n = target.value.length;
+                try { target.setSelectionRange(n, n); } catch (_) {}
+              }
+            };
+
+            // Streamlit may finish mounting the input a moment after the component.
+            setTimeout(focusAnswer, 60);
+            setTimeout(focusAnswer, 220);
+          } catch (err) {
+            // Autofocus is a convenience only; the form remains fully usable.
+          }
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def render_practice_options(
+    current_target: int,
+    mode_options: list[str],
+    tense_options: list[str],
+) -> tuple[str, str, int, bool]:
+    """Render the compact collapsible practice controls."""
+    summary_mode = str(st.session_state.get("practice_mode", "Everything"))
+    summary_parts = [summary_mode]
+    if summary_mode == "Verbs":
+        summary_parts.append(str(st.session_state.get("verb_tense_choice", "Mixed")))
+    summary_parts.append(f"retire {current_target}×")
+    options_label = "⚙ Practice options · " + " · ".join(summary_parts)
+
+    options_col, refresh_col = st.columns([9.2, 0.8], gap="small")
+    with refresh_col:
+        refresh = st.button(
+            "↻",
+            key="practice_refresh",
+            help="Refresh practice queue",
+            use_container_width=True,
+        )
+
+    with options_col:
+        with st.expander(options_label, expanded=False):
+            mode_col, target_col = st.columns([5.4, 2.4], gap="small")
+
+            with mode_col:
+                mode = st.radio(
+                    "Practise",
+                    mode_options,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="practice_mode",
+                )
+
+            with target_col:
+                chosen_target = st.radio(
+                    "Retire after",
+                    [3, 5],
+                    index=0 if current_target == 3 else 1,
+                    horizontal=True,
+                    format_func=lambda x: f"{x}×",
+                    key="mastery_target_choice",
+                    help="Retire after 3 or 5 clean recalls on separate days.",
+                )
+                if int(chosen_target) != current_target:
+                    set_setting("mastery_target", int(chosen_target))
+                    current_target = int(chosen_target)
+
+            verb_tense = "Mixed"
+            if mode == "Verbs":
+                verb_tense = st.radio(
+                    "Verb tense",
+                    tense_options,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="verb_tense_choice",
+                )
+
+            st.caption(
+                "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · "
+                "forgotten items return to learning."
+            )
+
+    mode = str(st.session_state.get("practice_mode", "Everything"))
+    verb_tense = (
+        str(st.session_state.get("verb_tense_choice", "Mixed"))
+        if mode == "Verbs"
+        else "Mixed"
+    )
+    return mode, verb_tense, current_target, refresh
+
+
 require_password()
 
 if not configured():
@@ -1807,81 +1923,18 @@ if page == "Practice":
         saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
         st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
 
-    # Collapsible practice options. The collapsed label keeps the current
-    # choices visible without using a large block of screen space.
+    # Practice choices are remembered across reruns, but their visible control
+    # box is rendered below the "Say it in Dutch" cue card.
     tense_options = ["Mixed", "Present", "Past", "Perfect"]
     if "verb_tense_choice" not in st.session_state:
         saved_tense = str(get_setting("practice_resume_verb_tense", "Mixed") or "Mixed")
         st.session_state.verb_tense_choice = saved_tense if saved_tense in tense_options else "Mixed"
 
-    summary_mode = str(st.session_state.get("practice_mode", "Everything"))
-    summary_parts = [summary_mode]
-    if summary_mode == "Verbs":
-        summary_parts.append(str(st.session_state.get("verb_tense_choice", "Mixed")))
-    summary_parts.append(f"retire {current_target}×")
-    options_label = "⚙ Practice options · " + " · ".join(summary_parts)
-
-    options_col, refresh_col = st.columns([9.2, 0.8], gap="small")
-    with refresh_col:
-        refresh = st.button(
-            "↻",
-            key="practice_refresh",
-            help="Refresh practice queue",
-            use_container_width=True,
-        )
-
-    with options_col:
-        with st.expander(options_label, expanded=False):
-            mode_col, target_col = st.columns([5.4, 2.4], gap="small")
-
-            with mode_col:
-                mode = st.radio(
-                    "Practise",
-                    mode_options,
-                    horizontal=True,
-                    label_visibility="collapsed",
-                    key="practice_mode",
-                )
-
-            with target_col:
-                chosen_target = st.radio(
-                    "Retire after",
-                    [3, 5],
-                    index=0 if current_target == 3 else 1,
-                    horizontal=True,
-                    format_func=lambda x: f"{x}×",
-                    key="mastery_target_choice",
-                    help="Retire after 3 or 5 clean recalls on separate days.",
-                )
-                if int(chosen_target) != current_target:
-                    set_setting("mastery_target", int(chosen_target))
-                    current_target = int(chosen_target)
-
-            verb_tense = "Mixed"
-            if mode == "Verbs":
-                verb_tense = st.radio(
-                    "Verb tense",
-                    tense_options,
-                    horizontal=True,
-                    label_visibility="collapsed",
-                    key="verb_tense_choice",
-                )
-
-            st.caption(
-                "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · "
-                "forgotten items return to learning."
-            )
-
-    # Ensure values exist outside the expander on every rerun.
     mode = str(st.session_state.get("practice_mode", "Everything"))
     verb_tense = (
         str(st.session_state.get("verb_tense_choice", "Mixed"))
         if mode == "Verbs"
         else "Mixed"
-    )
-    st.markdown(
-        "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
-        unsafe_allow_html=True,
     )
 
     if "practice_queue" not in st.session_state:
@@ -1892,7 +1945,7 @@ if page == "Practice":
         st.session_state.practice_loaded_key = None
 
     loaded_key = f"{mode}|{verb_tense}"
-    if refresh or st.session_state.get("practice_loaded_key") != loaded_key:
+    if st.session_state.get("practice_loaded_key") != loaded_key:
         with st.spinner("Loading practice…"):
             load_practice(mode, verb_tense)
 
@@ -1901,11 +1954,23 @@ if page == "Practice":
     stats = st.session_state.practice_stats
 
     if not queue:
+        mode, verb_tense, current_target, refresh = render_practice_options(
+            current_target, mode_options, tense_options
+        )
+        if refresh:
+            load_practice(mode, verb_tense)
+            st.rerun()
         st.info(f"Nothing is due in {mode.lower()} right now. You can generate/add material or choose another practice type.")
         if st.button("Check again", type="primary"):
             load_practice(mode, verb_tense)
             st.rerun()
     elif idx >= len(queue):
+        mode, verb_tense, current_target, refresh = render_practice_options(
+            current_target, mode_options, tense_options
+        )
+        if refresh:
+            load_practice(mode, verb_tense)
+            st.rerun()
         st.success("Session finished.")
         if st.button("Start another session", type="primary", use_container_width=True):
             load_practice(mode, verb_tense)
@@ -1942,6 +2007,19 @@ if page == "Practice":
             unsafe_allow_html=True,
         )
 
+        # The collapsible controls now sit below the cue instead of above it.
+        mode, verb_tense, current_target, refresh = render_practice_options(
+            current_target, mode_options, tense_options
+        )
+        if refresh:
+            load_practice(mode, verb_tense)
+            st.rerun()
+
+        st.markdown(
+            "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
+            unsafe_allow_html=True,
+        )
+
         fb = st.session_state.practice_feedback
         if not fb:
             placeholder = (
@@ -1962,6 +2040,11 @@ if page == "Practice":
                 b1, b2 = st.columns(2)
                 submit = b1.form_submit_button("Check", type="primary", use_container_width=True)
                 dont = b2.form_submit_button("I don't know", use_container_width=True)
+
+            # Laptop/desktop: cursor starts in the answer field automatically.
+            # Phone/tablet: no forced focus, so the on-screen keyboard does not
+            # jump open every time a new question appears.
+            autofocus_answer_input()
 
             if submit or dont:
                 grade = "dont_know" if dont else classify_answer_values(correct_answer, accepted_answers, typed)
