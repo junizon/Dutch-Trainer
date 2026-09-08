@@ -1613,14 +1613,16 @@ def apply_app_css(scale: float) -> None:
           .compact-stats {{ color:#62503e; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:5px; }}
           .sync-line {{ color:#695642; text-align:center; font-size:{0.70 * scale:.3f}rem; margin-top:1px; }}
           .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.68rem; margin:-.2rem 0 .12rem; }}
-          .answer-diff {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; line-height:1.62; font-size:{1.04 * scale:.3f}rem; }}
+          .answer-diff {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; line-height:1.58; font-size:{1.10 * scale:.3f}rem; }}
           .diff-label {{ display:inline-block; min-width:4.8rem; color:#574332; font-size:.86em; font-weight:800; }}
           .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
           .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
           .distance-line {{ color:#62503e; font-size:.82em; margin-top:4px; }}
-          .verb-answer {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; font-size:{1.04 * scale:.3f}rem; line-height:1.62; }}
+          .verb-answer {{ background:rgba(255,255,255,.78); border:1px solid #d8c49f; border-radius:10px; padding:10px 13px; margin:5px 0 6px; font-size:{1.12 * scale:.3f}rem; line-height:1.55; }}
           .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
           .feedback-heading {{ color:#2d2118; font-size:{1.05 * scale:.3f}rem; line-height:1.15; font-weight:800; margin:4px 0 3px; }}
+          .answer-line {{ color:#2d2118; font-size:{1.16 * scale:.3f}rem; line-height:1.42; margin:3px 0 4px; }}
+          .answer-line .answer-prefix {{ color:#574332; font-size:.82em; font-weight:800; margin-right:.35rem; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.00 * scale:.3f}rem !important; }}
           .stButton button, .stFormSubmitButton button {{ font-size:{0.92 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.5rem; }}
@@ -2238,7 +2240,11 @@ if page == "Practice":
                 if detail:
                     st.caption(detail)
             elif fb.get("grade") not in {"wrong", "typo"}:
-                st.markdown(f"**Dutch:** {html.escape(str(fb.get('correct', '')))}")
+                st.markdown(
+                    f'<div class="answer-line"><span class="answer-prefix">Dutch:</span>'
+                    f'{html.escape(str(fb.get("correct", "")))}</div>',
+                    unsafe_allow_html=True,
+                )
                 # Example sentences are intentionally omitted from immediate
                 # answer feedback. They add vertical clutter and can look like
                 # a second competing "correct answer".
