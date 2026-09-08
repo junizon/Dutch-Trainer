@@ -1619,52 +1619,77 @@ if page == "Practice":
         saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
         st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
 
-    # Compact practice controls. On a laptop these sit on one row; Streamlit can
-    # wrap/stack the columns on a narrow phone screen without changing behaviour.
-    mode_col, target_col, refresh_col = st.columns([5.4, 2.4, 0.7], gap="small")
+    # Collapsible practice options. The collapsed label keeps the current
+    # choices visible without using a large block of screen space.
+    tense_options = ["Mixed", "Present", "Past", "Perfect"]
+    if "verb_tense_choice" not in st.session_state:
+        saved_tense = str(get_setting("practice_resume_verb_tense", "Mixed") or "Mixed")
+        st.session_state.verb_tense_choice = saved_tense if saved_tense in tense_options else "Mixed"
 
-    with mode_col:
-        mode = st.radio(
-            "Practise",
-            mode_options,
-            horizontal=True,
-            label_visibility="collapsed",
-            key="practice_mode",
-        )
+    summary_mode = str(st.session_state.get("practice_mode", "Everything"))
+    summary_parts = [summary_mode]
+    if summary_mode == "Verbs":
+        summary_parts.append(str(st.session_state.get("verb_tense_choice", "Mixed")))
+    summary_parts.append(f"retire {current_target}×")
+    options_label = "⚙ Practice options · " + " · ".join(summary_parts)
 
-    with target_col:
-        chosen_target = st.radio(
-            "Retire after",
-            [3, 5],
-            index=0 if current_target == 3 else 1,
-            horizontal=True,
-            format_func=lambda x: f"{x}×",
-            key="mastery_target_choice",
-            help="Retire after 3 or 5 clean recalls on separate days.",
-        )
-        if int(chosen_target) != current_target:
-            set_setting("mastery_target", int(chosen_target))
-            current_target = int(chosen_target)
-
+    options_col, refresh_col = st.columns([9.2, 0.8], gap="small")
     with refresh_col:
-        refresh = st.button("↻", key="practice_refresh", help="Refresh practice queue", use_container_width=True)
-
-    verb_tense = "Mixed"
-    if mode == "Verbs":
-        tense_options = ["Mixed", "Present", "Past", "Perfect"]
-        if "verb_tense_choice" not in st.session_state:
-            saved_tense = str(get_setting("practice_resume_verb_tense", "Mixed") or "Mixed")
-            st.session_state.verb_tense_choice = saved_tense if saved_tense in tense_options else "Mixed"
-        verb_tense = st.radio(
-            "Verb tense",
-            tense_options,
-            horizontal=True,
-            label_visibility="collapsed",
-            key="verb_tense_choice",
+        refresh = st.button(
+            "↻",
+            key="practice_refresh",
+            help="Refresh practice queue",
+            use_container_width=True,
         )
 
-    st.caption(
-        "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · forgotten items return to learning."
+    with options_col:
+        with st.expander(options_label, expanded=False):
+            mode_col, target_col = st.columns([5.4, 2.4], gap="small")
+
+            with mode_col:
+                mode = st.radio(
+                    "Practise",
+                    mode_options,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="practice_mode",
+                )
+
+            with target_col:
+                chosen_target = st.radio(
+                    "Retire after",
+                    [3, 5],
+                    index=0 if current_target == 3 else 1,
+                    horizontal=True,
+                    format_func=lambda x: f"{x}×",
+                    key="mastery_target_choice",
+                    help="Retire after 3 or 5 clean recalls on separate days.",
+                )
+                if int(chosen_target) != current_target:
+                    set_setting("mastery_target", int(chosen_target))
+                    current_target = int(chosen_target)
+
+            verb_tense = "Mixed"
+            if mode == "Verbs":
+                verb_tense = st.radio(
+                    "Verb tense",
+                    tense_options,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="verb_tense_choice",
+                )
+
+            st.caption(
+                "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · "
+                "forgotten items return to learning."
+            )
+
+    # Ensure values exist outside the expander on every rerun.
+    mode = str(st.session_state.get("practice_mode", "Everything"))
+    verb_tense = (
+        str(st.session_state.get("verb_tense_choice", "Mixed"))
+        if mode == "Verbs"
+        else "Mixed"
     )
     st.markdown(
         "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
