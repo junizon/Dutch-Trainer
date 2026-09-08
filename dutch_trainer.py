@@ -359,7 +359,7 @@ def _char_diff_pair(mine: str, expected: str) -> tuple[str, str]:
 
 
 def sentence_diff_html(typed: str, expected: str) -> str:
-    """Word-aware diff for phrases/sentences; replacements get character-level detail."""
+    """Word-aware diff for sentences; replacements get character-level detail."""
     mine_words = _word_tokens(typed)
     exp_words = _word_tokens(expected)
     mine_norm = [w.lower().replace("’", "'") for w in mine_words]
@@ -1165,7 +1165,13 @@ def render_activity_banner() -> None:
 # AI generation
 # -----------------------------------------------------------------------------
 
-def generate_items(level: str, topic: str, count: int, kinds: list[str]) -> list[dict[str, Any]]:
+def generate_items(
+    level: str,
+    topic: str,
+    sentence_context: str,
+    count: int,
+    kinds: list[str],
+) -> list[dict[str, Any]]:
     if not OPENAI_KEY or OpenAI is None:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
@@ -1178,7 +1184,7 @@ def generate_items(level: str, topic: str, count: int, kinds: list[str]) -> list
                 "items": {
                     "type": "object",
                     "properties": {
-                        "item_type": {"type": "string", "enum": ["word", "phrase", "sentence"]},
+                        "item_type": {"type": "string", "enum": ["word", "sentence"]},
                         "dutch": {"type": "string"},
                         "english": {"type": "string"},
                         "example_nl": {"type": "string"},
@@ -1202,15 +1208,20 @@ def generate_items(level: str, topic: str, count: int, kinds: list[str]) -> list
     prompt = f"""
 Create exactly {count} useful Dutch learning items for an adult learner at CEFR {level}.
 Allowed item types: {', '.join(kinds)}.
-Topic: {topic or 'balanced everyday Dutch'}.
+Sentence context: {sentence_context}.
+Optional extra topic: {topic or 'none'}.
 
 Requirements:
 - Natural contemporary Dutch used in the Netherlands.
-- Mix practical everyday language with useful work/social language when the topic allows.
+- Do NOT generate phrase/fragments as a category. Every non-word item must be a complete sentence.
 - For nouns, include the correct article in the Dutch field (de/het).
-- Phrases should be useful chunks, not arbitrary fragments.
-- Sentences should be natural and worth memorising, generally 4-14 words.
-- English must be a concise cue suitable for a typing exercise.
+- Sentence items must be SHORT, high-frequency, directly reusable sentences: usually 3-8 words and never more than 10 words unless genuinely necessary.
+- For "Everyday life", favour home, shopping, errands, transport, appointments, food, making plans, small talk, practical problems, and common social situations.
+- For "Office", favour meetings, schedules, updates, asking for clarification, colleagues, deadlines, email/workflow language, availability, planning, and routine workplace interaction.
+- For "Mixed", balance everyday-life and office sentences across the batch when enough sentence items are requested.
+- Keep the vocabulary appropriate to CEFR {level}. At B1/B2, short must NOT mean childish or A1-basic; use compact but genuinely useful intermediate language.
+- Avoid textbook-sounding filler, artificial examples, rare idioms, and trivial variations of the same sentence.
+- English must be a concise natural cue suitable for a typing exercise.
 - Do not generate Chinese translations.
 - example_nl/example_en are optional in spirit but must be strings; for a sentence item, they may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
@@ -1663,11 +1674,11 @@ def apply_app_css(scale: float) -> None:
 
 def practice_type_set(mode: str) -> set[str] | None:
     return {
+        "Everything": {"word", "sentence"},
         "Words": {"word"},
         "Verbs": {"sentence"},
-        "Phrases": {"phrase"},
         "Sentences": {"sentence"},
-    }.get(mode)
+    }.get(mode, {"word", "sentence"})
 
 
 def load_practice(mode: str, verb_tense: str = "Mixed") -> None:
@@ -1980,12 +1991,24 @@ if st.session_state.get("scheduler_migration_note"):
     st.caption(f"Learning-schedule migration skipped: {st.session_state.scheduler_migration_note}")
 
 
+# Content model v2 removes standalone phrase practice. Existing phrase rows are
+# intentionally preserved in Supabase so historical review/streak data remain intact.
+if st.session_state.get("content_model_version") != 2:
+    st.session_state.practice_queue = []
+    st.session_state.practice_index = 0
+    st.session_state.practice_feedback = None
+    st.session_state.practice_loaded_key = None
+    if st.session_state.get("practice_mode") == "Phrases":
+        st.session_state.practice_mode = "Everything"
+    st.session_state.content_model_version = 2
+
+
 # Practice --------------------------------------------------------------------
 if page == "Practice":
     current_target = mastery_target()
     install_keyboard_shortcuts()
 
-    mode_options = ["Everything", "Words", "Verbs", "Phrases", "Sentences"]
+    mode_options = ["Everything", "Words", "Verbs", "Sentences"]
     if "practice_mode" not in st.session_state:
         saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
         st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
@@ -2093,7 +2116,6 @@ if page == "Practice":
             placeholder = (
                 "type the complete Dutch sentence" if is_verb_item(item) else {
                     "word": "type the Dutch word",
-                    "phrase": "type the Dutch phrase",
                     "sentence": "type the Dutch sentence",
                 }.get(str(item.get("item_type")), "type the Dutch")
             )
@@ -2289,14 +2311,14 @@ elif page == "Generate":
     else:
         generator_kind = st.radio(
             "Generator",
-            ["Words / phrases / sentences", "Verb conjugation sets"],
+            ["Words / short sentences", "Verb conjugation sets"],
             horizontal=True,
             label_visibility="collapsed",
         )
         level = st.selectbox("Level", ["A2", "B1", "B2"], index=1)
-        topic = st.text_input("Topic", value="everyday Dutch")
 
         if generator_kind == "Verb conjugation sets":
+            topic = st.text_input("Topic", value="everyday Dutch")
             count = st.select_slider(
                 "How many verbs",
                 options=[5, 10, 15, 20],
@@ -2319,17 +2341,35 @@ elif page == "Generate":
         else:
             kinds = st.multiselect(
                 "Include",
-                ["word", "phrase", "sentence"],
-                default=["word", "phrase", "sentence"],
+                ["word", "sentence"],
+                default=["word", "sentence"],
+            )
+            sentence_context = st.radio(
+                "Sentence setting",
+                ["Everyday life", "Office", "Mixed"],
+                index=2,
+                horizontal=True,
+                help="Applies to generated sentences. Mixed balances everyday-life and office use.",
+            )
+            topic = st.text_input(
+                "Extra topic (optional)",
+                value="",
+                placeholder="e.g. appointments, meetings, shopping",
             )
             count = st.slider("How many", 3, 20, 8)
+            st.caption(
+                "Sentences are kept short and frequently usable—usually 3–8 words. "
+                "At B1/B2, short still means genuinely intermediate Dutch."
+            )
             if st.button("Generate", type="primary"):
                 if not kinds:
                     st.error("Choose at least one item type.")
                 else:
                     try:
                         with st.spinner("Generating…"):
-                            st.session_state.generated_preview = generate_items(level, topic, count, kinds)
+                            st.session_state.generated_preview = generate_items(
+                                level, topic, sentence_context, count, kinds
+                            )
                         st.success(f"Generated {len(st.session_state.generated_preview)} items. Review them before saving.")
                     except Exception as exc:
                         st.error(f"Generation failed: {exc}")
@@ -2360,7 +2400,7 @@ elif page == "Generate":
 elif page == "Add":
     st.subheader("Add your own")
     with st.form("add_item"):
-        item_type = st.selectbox("Type", ["word", "phrase", "sentence"])
+        item_type = st.selectbox("Type", ["word", "sentence"])
         dutch = st.text_input("Dutch")
         english = st.text_input("English cue")
         level = st.selectbox("Level", ["A1", "A2", "B1", "B2", "C1"], index=2, key="manual_level")
@@ -2403,7 +2443,10 @@ elif page == "Library":
     st.subheader("Library")
     st.caption("Retired items stay out of ordinary practice until their sparse long-term review is due.")
     try:
-        items = fetch_items(include_inactive=True)
+        items = [
+            item for item in fetch_items(include_inactive=True)
+            if str(item.get("item_type", "")) != "phrase"
+        ]
         library_progress = fetch_progress()
         library_target = mastery_target()
     except Exception as exc:
@@ -2417,7 +2460,7 @@ elif page == "Library":
     state_view = f2.selectbox("Status", ["Active", "Retired", "All"], key="library_status")
 
     f3, f4 = st.columns(2)
-    typ = f3.selectbox("Type", ["all", "word", "verb", "phrase", "sentence"], key="library_type")
+    typ = f3.selectbox("Type", ["all", "word", "verb", "sentence"], key="library_type")
     level_view = f4.selectbox("Level", ["all", "A1", "A2", "B1", "B2", "C1"], key="library_level")
 
     filtered = []
@@ -2497,7 +2540,10 @@ elif page == "Library":
 elif page == "Progress":
     st.subheader("Progress")
     try:
-        items = fetch_items(include_inactive=True)
+        items = [
+            item for item in fetch_items(include_inactive=True)
+            if str(item.get("item_type", "")) != "phrase"
+        ]
         prog = fetch_progress()
     except Exception as exc:
         st.error(f"Could not load progress: {exc}")
