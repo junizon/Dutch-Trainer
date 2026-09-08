@@ -854,6 +854,52 @@ def migrate_scheduler_v2() -> None:
     set_setting("scheduler_version", 2)
 
 
+def migrate_scheduler_v3() -> int:
+    """Repair failed/unknown items that older builds accidentally postponed.
+
+    v3.2 fixed the scheduler for NEW answers, but progress rows already written
+    by older versions still had due_on=tomorrow after wrong / don't-know / typo.
+    Those rows need a one-time repair so they become available immediately.
+    Correct recalls keep their legitimate future spacing.
+    """
+    migrate_scheduler_v2()
+
+    try:
+        version = int(get_setting("scheduler_version", 2))
+    except Exception:
+        version = 2
+    if version >= 3:
+        return 0
+
+    today = local_today().isoformat()
+    items = fetch_items(include_inactive=True)
+    prog = fetch_progress()
+    repaired = 0
+
+    for item in items:
+        # Only repair material that is currently in the learning pool.
+        if not bool(item.get("active", True)):
+            continue
+
+        p = prog.get(str(item["id"]))
+        if not p:
+            continue
+
+        last_grade = str(p.get("last_grade") or "")
+        due_on = str(p.get("due_on") or today)
+
+        if last_grade in {"wrong", "dont_know", "typo"} and due_on > today:
+            supa_patch(
+                "trainer_progress",
+                {"item_id": f"eq.{item['id']}"},
+                {"due_on": today, "interval_days": 0},
+            )
+            repaired += 1
+
+    set_setting("scheduler_version", 3)
+    return repaired
+
+
 # -----------------------------------------------------------------------------
 # Streak + time helpers
 # -----------------------------------------------------------------------------
@@ -1862,12 +1908,13 @@ if not st.session_state.get("trainer_connection_checked"):
         st.stop()
 
 _settings_cache()
-if not st.session_state.get("scheduler_migration_checked"):
+if not st.session_state.get("scheduler_migration_v3_checked"):
     try:
-        migrate_scheduler_v2()
+        repaired = migrate_scheduler_v3()
+        st.session_state.scheduler_repaired_items = repaired
     except Exception as exc:
         st.session_state.scheduler_migration_note = str(exc)
-    st.session_state.scheduler_migration_checked = True
+    st.session_state.scheduler_migration_v3_checked = True
 
 current_scale = font_scale()
 apply_app_css(current_scale)
@@ -1967,7 +2014,10 @@ if page == "Practice":
         if refresh:
             load_practice(mode, verb_tense)
             st.rerun()
-        st.info(f"Nothing is due in {mode.lower()} right now. You can generate/add material or choose another practice type.")
+        st.info(
+            f"Nothing is due in {mode.lower()} right now. Items you answered correctly may be waiting for their next spaced review; "
+            "wrong, typo, and “I don't know” items stay available today."
+        )
         if st.button("Check again", type="primary"):
             load_practice(mode, verb_tense)
             st.rerun()
