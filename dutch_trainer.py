@@ -1499,7 +1499,7 @@ def apply_app_css(scale: float) -> None:
             color-scheme:light !important;
           }}
           .stApp {{ background:#f3ead9; color:#2d2118 !important; }}
-          .block-container {{ max-width:760px; padding-top:1.05rem; padding-bottom:2.5rem; }}
+          .block-container {{ max-width:760px; padding-top:.55rem; padding-bottom:2rem; }}
           #MainMenu, footer {{ visibility:hidden; }}
           header[data-testid="stHeader"] {{ background:transparent; }}
 
@@ -1530,9 +1530,9 @@ def apply_app_css(scale: float) -> None:
           button[kind="secondary"] p, button[kind="primary"] p {{ color:inherit !important; -webkit-text-fill-color:inherit !important; }}
           button:disabled {{ opacity:.48 !important; }}
 
-          .trainer-kicker {{ color:#c3780a; letter-spacing:.18em; font-size:.78rem; font-weight:800; margin-bottom:.15rem; }}
-          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
-          .trainer-sub {{ color:#62503e; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
+          .trainer-kicker {{ color:#c3780a; letter-spacing:.16em; font-size:.64rem; font-weight:800; margin-bottom:.05rem; }}
+          .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.85 * scale:.3f}rem; line-height:1.0; margin-bottom:.22rem; }}
+          .trainer-sub {{ color:#62503e; font-size:{0.78 * scale:.3f}rem; margin-bottom:.05rem; }}
 
           .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #ddcbaa; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(75,53,31,.06); }}
           .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }}
@@ -1554,9 +1554,9 @@ def apply_app_css(scale: float) -> None:
             .activity-foot {{ margin-top:2px; text-align:right; }}
           }}
 
-          .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:12px; padding:30px 18px; margin:12px 0 14px; box-shadow:0 8px 22px rgba(75,53,31,.07); text-align:center; }}
-          .cue-kicker {{ color:#71583d; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
-          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.05 * scale:.3f}rem; line-height:1.2; margin-top:12px; overflow-wrap:anywhere; }}
+          .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:10px; padding:14px 16px; margin:7px 0 8px; box-shadow:0 3px 10px rgba(75,53,31,.05); text-align:center; }}
+          .cue-kicker {{ color:#71583d; letter-spacing:.13em; font-size:{0.64 * scale:.3f}rem; font-weight:700; }}
+          .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.45 * scale:.3f}rem; line-height:1.18; margin-top:5px; overflow-wrap:anywhere; }}
           .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
           .compact-stats {{ color:#62503e; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
           .sync-line {{ color:#695642; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
@@ -1569,23 +1569,24 @@ def apply_app_css(scale: float) -> None:
           .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; font-size:{1.02 * scale:.3f}rem; line-height:1.7; }}
           .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
 
-          .stTextInput input, .stTextArea textarea {{ font-size:{1.05 * scale:.3f}rem !important; }}
+          .stTextInput input, .stTextArea textarea {{ font-size:{1.00 * scale:.3f}rem !important; }}
           .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
           .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#62503e !important; font-size:{0.80 * scale:.3f}rem !important; }}
 
           /* Keep the small A− / A+ controls in one row on narrow Android screens. */
-          .st-key-font_controls [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center !important; }}
+          .st-key-font_controls [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center !important; gap:.35rem !important; }}
           .st-key-font_controls [data-testid="stColumn"] {{ min-width:0 !important; width:auto !important; }}
+          .st-key-font_controls button {{ min-height:2rem !important; height:2rem !important; padding:.1rem .45rem !important; font-size:.78rem !important; }}
 
           @media (max-width:560px) {{
-            .block-container {{ padding-left:.7rem; padding-right:.7rem; padding-top:.8rem; }}
-            .trainer-title {{ font-size:{2.15 * scale:.3f}rem; }}
-            .trainer-sub {{ font-size:{0.88 * scale:.3f}rem; }}
+            .block-container {{ padding-left:.7rem; padding-right:.7rem; padding-top:.45rem; }}
+            .trainer-title {{ font-size:{1.65 * scale:.3f}rem; }}
+            .trainer-sub {{ font-size:{0.74 * scale:.3f}rem; }}
             .activity-stats {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-            .cue-card {{ padding:22px 12px; }}
-            .cue-text {{ font-size:{1.75 * scale:.3f}rem; }}
+            .cue-card {{ padding:12px 10px; }}
+            .cue-text {{ font-size:{1.35 * scale:.3f}rem; }}
             [data-testid="stRadio"] label p {{ font-size:{0.82 * scale:.3f}rem !important; }}
           }}
         </style>
