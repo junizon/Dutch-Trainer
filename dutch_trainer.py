@@ -1458,11 +1458,14 @@ def advance_practice(mode: str, verb_tense: str = "Mixed") -> None:
 
 
 def install_keyboard_shortcuts() -> None:
-    """Laptop shortcuts without changing the phone UI.
+    """Reliable laptop shortcuts without changing the phone UI.
 
-    Enter inside the answer form is handled natively by Streamlit and submits
-    the first form button (Check). This tiny browser-side listener adds Escape
-    for “I don't know” and Enter for “Next” only when those buttons are visible.
+    Enter in the unanswered form keeps Streamlit's normal behaviour and submits
+    Check. Escape clicks “I don't know”. Once feedback is visible, Enter clicks
+    Next even if focus is still sitting in the answer field.
+
+    The handler is deliberately replaced on every app render so an older
+    Streamlit rerun/deployment cannot leave a stale listener behind.
     """
     components.html(
         """
@@ -1471,31 +1474,50 @@ def install_keyboard_shortcuts() -> None:
           try {
             const w = window.parent;
             const d = w.document;
-            if (w.__dutchTrainerShortcutHandler) return;
+
+            // Remove any handler installed by an earlier Streamlit render/version.
+            if (w.__dutchTrainerShortcutHandler) {
+              d.removeEventListener('keydown', w.__dutchTrainerShortcutHandler, true);
+              w.removeEventListener('keydown', w.__dutchTrainerShortcutHandler, true);
+            }
+
             const visibleButton = (label) => Array.from(d.querySelectorAll('button')).find((b) => {
-              const text = (b.innerText || '').trim();
+              const text = (b.textContent || '').replace(/\\s+/g, ' ').trim();
               const visible = !!(b.offsetWidth || b.offsetHeight || b.getClientRects().length);
-              return visible && text === label && !b.disabled;
+              return visible && (text === label || text.startsWith(label)) && !b.disabled;
             });
-            w.__dutchTrainerShortcutHandler = (e) => {
-              if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
-              const active = d.activeElement;
-              const tag = active && active.tagName ? active.tagName.toLowerCase() : '';
-              if (e.key === 'Escape') {
+
+            const handler = (e) => {
+              if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+
+              if (e.key === 'Escape' || e.key === 'Esc') {
                 const btn = visibleButton("I don't know");
-                if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
+                if (btn) {
+                  e.preventDefault();
+                  e.stopImmediatePropagation();
+                  btn.click();
+                }
                 return;
               }
+
               if (e.key === 'Enter') {
-                // While typing, let the Streamlit form submit Check normally.
-                if (tag === 'input' || tag === 'textarea' || tag === 'button') return;
-                const btn = visibleButton('Next →') || visibleButton('Next');
-                if (btn) { e.preventDefault(); e.stopPropagation(); btn.click(); }
+                // If feedback is already visible, Enter means Next, even when
+                // focus remained in the answer field after checking.
+                const next = visibleButton('Next →') || visibleButton('Next');
+                if (next) {
+                  e.preventDefault();
+                  e.stopImmediatePropagation();
+                  next.click();
+                  return;
+                }
+                // Otherwise leave Enter alone: Streamlit's form submits Check.
               }
             };
-            d.addEventListener('keydown', w.__dutchTrainerShortcutHandler, true);
+
+            w.__dutchTrainerShortcutHandler = handler;
+            w.addEventListener('keydown', handler, true);
           } catch (err) {
-            // Keyboard shortcuts are optional; the visible buttons always remain.
+            // Shortcuts are optional; visible buttons always remain available.
           }
         })();
         </script>
@@ -1766,6 +1788,16 @@ if page == "Practice":
                 fb = st.session_state.practice_feedback
 
         if fb:
+            # Keep Next immediately beside the answer controls visually instead
+            # of placing it below all feedback/pronunciation content.
+            st.button(
+                "Next →",
+                type="primary",
+                on_click=advance_practice,
+                args=(mode, verb_tense),
+                key=f"next_{item['id']}_{idx}",
+            )
+
             labels = {
                 "correct": "✅ Correct",
                 "typo": "⌨️ Small typing mistake — treated gently",
@@ -1797,13 +1829,6 @@ if page == "Practice":
                 st.caption(str(item.get("example_nl")))
             pronunciation_box(str(fb.get("correct", "")), f"practice-{idx}")
 
-            st.button(
-                "Next →",
-                type="primary",
-                use_container_width=True,
-                on_click=advance_practice,
-                args=(mode, verb_tense),
-            )
 
     usage = usage_display()
     pending_n, _ = drain_pending_syncs()
