@@ -839,17 +839,18 @@ def render_activity_banner() -> None:
         f"""
         <div class="activity-card">
           <div class="activity-top">
-            <div class="streak-pill">{flame} <strong>{current}</strong> DAYS</div>
-            <div class="trainer-dots">{''.join(dots)}</div>
+            <div class="activity-left">
+              <div class="streak-pill">{flame} <strong>{current}</strong> DAYS</div>
+              <div class="trainer-dots">{''.join(dots)}</div>
+            </div>
+            <div class="activity-inline-stats">
+              <span><strong>{_format_duration(usage['today'])}</strong> today</span>
+              <span><strong>{_format_duration(usage['week'])}</strong> week</span>
+              <span><strong>{_format_duration(usage['total'])}</strong> total</span>
+              <span><strong>{snap['review_count']}</strong> answers</span>
+            </div>
           </div>
-          <div class="activity-message">{html.escape(summary['message'])}</div>
-          <div class="activity-stats">
-            <div><strong>{_format_duration(usage['today'])}</strong><span>today</span></div>
-            <div><strong>{_format_duration(usage['week'])}</strong><span>this week</span></div>
-            <div><strong>{_format_duration(usage['total'])}</strong><span>total</span></div>
-            <div><strong>{snap['review_count']}</strong><span>answers</span></div>
-          </div>
-          <div class="activity-foot">Best streak: {best} days · {rests} rest day{'s' if rests != 1 else ''} in current streak · up to {REST_DAYS_ALLOWED} consecutive rest days allowed</div>
+          <div class="activity-foot">Best {best} · rest {rests}/{REST_DAYS_ALLOWED}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -978,10 +979,12 @@ def insert_items(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
 
 def pronunciation_box(text: str, key: str) -> None:
     safe = json.dumps(text, ensure_ascii=False).replace("</", "<\\/")
-    forvo = f"https://forvo.com/search/{quote(text)}/nl/"
+    forvo = f"https://forvo.com/search/{quote(text, safe='')}/nl/"
+    deepl = f"https://www.deepl.com/translator#nl/en/{quote(text, safe='')}"
     block = f"""
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px;">
       <button id="speak-{key}" style="font:600 14px system-ui;padding:8px 12px;border-radius:9px;border:1px solid #aaa;background:transparent;cursor:pointer;">🔊 Pronounce</button>
+      <a href="{deepl}" target="_blank" rel="noopener" style="font:600 14px system-ui;">DeepL ↗</a>
       <a href="{forvo}" target="_blank" rel="noopener" style="font:600 14px system-ui;">Forvo ↗</a>
     </div>
     <script>
@@ -1084,20 +1087,25 @@ def apply_app_css(scale: float) -> None:
           .trainer-title {{ color:#173a68; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
           .trainer-sub {{ color:#6c829e; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
 
-          .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #d9e3ef; border-radius:18px; padding:14px 16px; margin:8px 0 14px; box-shadow:0 5px 18px rgba(44,77,116,.06); }}
-          .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }}
-          .streak-pill {{ border:1px solid #f0cda9; background:#fff7ef; color:#c96f18; border-radius:999px; padding:7px 13px; font-size:{0.90 * scale:.3f}rem; letter-spacing:.05em; }}
-          .trainer-dots {{ display:flex; gap:7px; align-items:center; }}
-          .trainer-dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; border:1px solid #c7d6e6; background:#edf3f8; }}
+          .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #d9e3ef; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(44,77,116,.05); }}
+          .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }}
+          .activity-left {{ display:flex; align-items:center; gap:9px; min-width:0; }}
+          .streak-pill {{ border:1px solid #f0cda9; background:#fff7ef; color:#c96f18; border-radius:999px; padding:4px 9px; font-size:{0.78 * scale:.3f}rem; letter-spacing:.04em; white-space:nowrap; }}
+          .trainer-dots {{ display:flex; gap:5px; align-items:center; }}
+          .trainer-dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; border:1px solid #c7d6e6; background:#edf3f8; }}
           .trainer-dot.active {{ background:#4773a6; border-color:#4773a6; }}
           .trainer-dot.rest {{ background:#fff2dc; border-color:#e6c58d; }}
-          .trainer-dot.today {{ outline:2px solid #173a68; outline-offset:2px; }}
-          .activity-message {{ color:#526d8d; margin-top:8px; font-size:{0.92 * scale:.3f}rem; }}
-          .activity-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:12px; text-align:center; }}
-          .activity-stats div {{ border-top:1px solid #e3ebf3; padding-top:9px; }}
-          .activity-stats strong {{ display:block; color:#173a68; font-size:{1.08 * scale:.3f}rem; }}
-          .activity-stats span {{ display:block; color:#7590ad; font-size:{0.74 * scale:.3f}rem; }}
-          .activity-foot {{ color:#7890a8; font-size:{0.76 * scale:.3f}rem; margin-top:9px; text-align:center; }}
+          .trainer-dot.today {{ outline:1.5px solid #173a68; outline-offset:2px; }}
+          .activity-inline-stats {{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; color:#7590ad; font-size:{0.69 * scale:.3f}rem; }}
+          .activity-inline-stats strong {{ color:#173a68; font-size:{0.82 * scale:.3f}rem; }}
+          .activity-foot {{ color:#8195aa; font-size:{0.65 * scale:.3f}rem; margin-top:4px; text-align:right; }}
+          @media (max-width: 640px) {{
+            .activity-card {{ padding:7px 9px 6px; }}
+            .activity-top {{ gap:6px; }}
+            .activity-left {{ width:100%; justify-content:space-between; }}
+            .activity-inline-stats {{ width:100%; justify-content:space-between; gap:5px; }}
+            .activity-foot {{ margin-top:2px; text-align:right; }}
+          }}
 
           .cue-card {{ background:#fff; border:1px solid #d6e1ed; border-radius:12px; padding:30px 18px; margin:12px 0 14px; box-shadow:0 8px 22px rgba(44,77,116,.07); text-align:center; }}
           .cue-kicker {{ color:#7893b0; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
