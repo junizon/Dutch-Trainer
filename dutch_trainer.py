@@ -1322,34 +1322,39 @@ if page == "Practice":
         saved_mode = str(get_setting("practice_resume_mode", "Everything") or "Everything")
         st.session_state.practice_mode = saved_mode if saved_mode in mode_options else "Everything"
 
-    mode = st.radio(
-        "Practise",
-        mode_options,
-        horizontal=True,
-        label_visibility="collapsed",
-        key="practice_mode",
-    )
+    # Compact practice controls. On a laptop these sit on one row; Streamlit can
+    # wrap/stack the columns on a narrow phone screen without changing behaviour.
+    mode_col, target_col, refresh_col = st.columns([4.8, 2.8, 0.8], gap="small")
 
-    target_col, refresh_col = st.columns([3.4, 1])
+    with mode_col:
+        mode = st.radio(
+            "Practise",
+            mode_options,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="practice_mode",
+        )
+
     with target_col:
         chosen_target = st.radio(
             "Retire after",
             [3, 5],
             index=0 if current_target == 3 else 1,
             horizontal=True,
-            format_func=lambda x: f"{x} correct",
+            format_func=lambda x: f"{x}×",
             key="mastery_target_choice",
+            help="Retire after 3 or 5 clean recalls on separate days.",
         )
         if int(chosen_target) != current_target:
             set_setting("mastery_target", int(chosen_target))
             current_target = int(chosen_target)
             # Existing local queue can keep going; the next answer uses the new target.
+
     with refresh_col:
-        refresh = st.button("Refresh", use_container_width=True)
+        refresh = st.button("↻", key="practice_refresh", help="Refresh practice queue", use_container_width=True)
 
     st.caption(
-        "Only one clean recall per calendar day advances mastery. Retired items return after "
-        "45 → 90 → 180 → 365 days; if you forget one, it returns to learning."
+        "Mastery: 1 clean recall/day · long-term review 45 → 90 → 180 → 365d · forgotten items return to learning."
     )
     st.markdown(
         "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
