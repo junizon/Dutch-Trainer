@@ -1452,7 +1452,7 @@ def pronunciation_box(text: str, key: str, show_forvo: bool = False) -> None:
     }})();
     </script>
     """
-    components.html(block, height=46)
+    components.html(block, height=42)
 
 
 # -----------------------------------------------------------------------------
@@ -1558,19 +1558,20 @@ def apply_app_css(scale: float) -> None:
           .cue-kicker {{ color:#71583d; letter-spacing:.13em; font-size:{0.64 * scale:.3f}rem; font-weight:700; }}
           .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{1.45 * scale:.3f}rem; line-height:1.18; margin-top:5px; overflow-wrap:anywhere; }}
           .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
-          .compact-stats {{ color:#62503e; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
-          .sync-line {{ color:#695642; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
-          .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
-          .answer-diff {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; line-height:1.8; font-size:{0.98 * scale:.3f}rem; }}
+          .compact-stats {{ color:#62503e; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:5px; }}
+          .sync-line {{ color:#695642; text-align:center; font-size:{0.70 * scale:.3f}rem; margin-top:1px; }}
+          .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.68rem; margin:-.2rem 0 .12rem; }}
+          .answer-diff {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:9px; padding:6px 9px; margin:4px 0 5px; line-height:1.48; font-size:{0.92 * scale:.3f}rem; }}
           .diff-label {{ display:inline-block; min-width:4.4rem; color:#62503e; font-size:.82em; font-weight:700; }}
           .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
           .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
           .distance-line {{ color:#62503e; font-size:.78em; margin-top:2px; }}
-          .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; font-size:{1.02 * scale:.3f}rem; line-height:1.7; }}
+          .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:9px; padding:6px 9px; margin:4px 0 5px; font-size:{0.94 * scale:.3f}rem; line-height:1.48; }}
           .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
+          .feedback-heading {{ color:#2d2118; font-size:{1.05 * scale:.3f}rem; line-height:1.15; font-weight:800; margin:4px 0 3px; }}
 
           .stTextInput input, .stTextArea textarea {{ font-size:{1.00 * scale:.3f}rem !important; }}
-          .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
+          .stButton button, .stFormSubmitButton button {{ font-size:{0.92 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.5rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
           .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#62503e !important; font-size:{0.80 * scale:.3f}rem !important; }}
@@ -2016,13 +2017,12 @@ if page == "Practice":
             load_practice(mode, verb_tense)
             st.rerun()
 
-        st.markdown(
-            "<div class='keyboard-hint'>Laptop: Enter = Check / Next · Esc = I don't know</div>",
-            unsafe_allow_html=True,
-        )
-
         fb = st.session_state.practice_feedback
         if not fb:
+            st.markdown(
+                "<div class='keyboard-hint'>Laptop: Enter = Check · Esc = I don't know</div>",
+                unsafe_allow_html=True,
+            )
             placeholder = (
                 "type the complete Dutch sentence" if is_verb_item(item) else {
                     "word": "type the Dutch word",
@@ -2122,7 +2122,10 @@ if page == "Practice":
                 "wrong": "❌ Not quite",
                 "dont_know": "🌱 Not known yet",
             }
-            st.markdown(f"### {labels.get(fb['grade'], fb['grade'])}")
+            st.markdown(
+                f'<div class="feedback-heading">{html.escape(labels.get(fb["grade"], fb["grade"]))}</div>',
+                unsafe_allow_html=True,
+            )
             transition = fb.get("transition", "")
             if transition == "retire":
                 st.caption(
@@ -2179,10 +2182,9 @@ if page == "Practice":
                     st.caption(detail)
             elif fb.get("grade") not in {"wrong", "typo"}:
                 st.markdown(f"**Dutch:** {html.escape(str(fb.get('correct', '')))}")
-                if item.get("example_nl"):
-                    st.caption(str(item.get("example_nl")))
-            elif item.get("example_nl"):
-                st.caption(str(item.get("example_nl")))
+                # Example sentences are intentionally omitted from immediate
+                # answer feedback. They add vertical clutter and can look like
+                # a second competing "correct answer".
 
 
 
