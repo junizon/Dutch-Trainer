@@ -1411,15 +1411,28 @@ def insert_items(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
 # Pronunciation helper
 # -----------------------------------------------------------------------------
 
-def pronunciation_box(text: str, key: str) -> None:
+def pronunciation_box(text: str, key: str, show_forvo: bool = False) -> None:
     safe = json.dumps(text, ensure_ascii=False).replace("</", "<\\/")
     forvo = f"https://forvo.com/search/{quote(text, safe='')}/nl/"
-    deepl = f"https://www.deepl.com/translator#nl/en/{quote(text, safe='')}"
+    forvo_link = (
+        f'<a href="{forvo}" target="_blank" rel="noopener" '
+        'style="font:700 13px system-ui;color:#4f3c2d;text-decoration:none;white-space:nowrap;">Forvo ↗</a>'
+        if show_forvo else ""
+    )
     block = f"""
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 4px;">
-      <button id="speak-{key}" style="font:600 14px system-ui;padding:8px 12px;border-radius:9px;border:1px solid #aaa;background:transparent;cursor:pointer;">🔊 Pronounce</button>
-      <a href="{deepl}" target="_blank" rel="noopener" style="font:600 14px system-ui;">DeepL ↗</a>
-      <a href="{forvo}" target="_blank" rel="noopener" style="font:600 14px system-ui;">Forvo ↗</a>
+    <div style="display:flex;gap:9px;align-items:center;flex-wrap:nowrap;margin:0;">
+      <button id="speak-{key}" style="
+        font:700 14px system-ui;
+        padding:8px 12px;
+        min-height:42px;
+        border-radius:10px;
+        border:1px solid #bca98a;
+        background:#ffffff;
+        color:#3b2b20;
+        cursor:pointer;
+        white-space:nowrap;
+      ">🔊 Pronounce</button>
+      {forvo_link}
     </div>
     <script>
     (() => {{
@@ -1439,7 +1452,7 @@ def pronunciation_box(text: str, key: str) -> None:
     }})();
     </script>
     """
-    components.html(block, height=55)
+    components.html(block, height=46)
 
 
 # -----------------------------------------------------------------------------
@@ -1495,7 +1508,7 @@ def apply_app_css(scale: float) -> None:
           [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
           [data-testid="stRadio"] label, [data-testid="stRadio"] label p,
           [data-testid="stRadio"] [data-testid="stMarkdownContainer"] p {{
-            color:#745f47 !important; -webkit-text-fill-color:#745f47 !important;
+            color:#574332 !important; -webkit-text-fill-color:#574332 !important;
           }}
           [data-testid="stRadio"] svg {{ color:#c3780a !important; }}
           [data-baseweb="input"], [data-baseweb="textarea"],
@@ -1504,10 +1517,10 @@ def apply_app_css(scale: float) -> None:
             -webkit-text-fill-color:#2d2118 !important;
           }}
           .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
-            color:#ad9b82 !important; -webkit-text-fill-color:#ad9b82 !important; opacity:1 !important;
+            color:#8d7a63 !important; -webkit-text-fill-color:#8d7a63 !important; opacity:1 !important;
           }}
           button[kind="secondary"] {{
-            background:#ffffff !important; color:#745f47 !important;
+            background:#ffffff !important; color:#574332 !important;
             border-color:#d7c4a3 !important;
           }}
           button[kind="primary"] {{
@@ -1519,7 +1532,7 @@ def apply_app_css(scale: float) -> None:
 
           .trainer-kicker {{ color:#c3780a; letter-spacing:.18em; font-size:.78rem; font-weight:800; margin-bottom:.15rem; }}
           .trainer-title {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.55 * scale:.3f}rem; line-height:.95; margin-bottom:.65rem; }}
-          .trainer-sub {{ color:#7b6e5d; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
+          .trainer-sub {{ color:#62503e; font-size:{0.95 * scale:.3f}rem; margin-bottom:.2rem; }}
 
           .activity-card {{ background:rgba(255,255,255,.88); border:1px solid #ddcbaa; border-radius:14px; padding:8px 11px 7px; margin:6px 0 9px; box-shadow:0 3px 10px rgba(75,53,31,.06); }}
           .activity-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; }}
@@ -1530,9 +1543,9 @@ def apply_app_css(scale: float) -> None:
           .trainer-dot.active {{ background:#c3780a; border-color:#c3780a; }}
           .trainer-dot.rest {{ background:#f2e5ca; border-color:#d5b77f; }}
           .trainer-dot.today {{ outline:1.5px solid #2d2118; outline-offset:2px; }}
-          .activity-inline-stats {{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; color:#8a7964; font-size:{0.69 * scale:.3f}rem; }}
+          .activity-inline-stats {{ display:flex; align-items:center; gap:11px; flex-wrap:wrap; color:#66533f; font-size:{0.69 * scale:.3f}rem; }}
           .activity-inline-stats strong {{ color:#2d2118; font-size:{0.82 * scale:.3f}rem; }}
-          .activity-foot {{ color:#8a7964; font-size:{0.65 * scale:.3f}rem; margin-top:4px; text-align:right; }}
+          .activity-foot {{ color:#66533f; font-size:{0.65 * scale:.3f}rem; margin-top:4px; text-align:right; }}
           @media (max-width: 640px) {{
             .activity-card {{ padding:7px 9px 6px; }}
             .activity-top {{ gap:6px; }}
@@ -1542,17 +1555,17 @@ def apply_app_css(scale: float) -> None:
           }}
 
           .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:12px; padding:30px 18px; margin:12px 0 14px; box-shadow:0 8px 22px rgba(75,53,31,.07); text-align:center; }}
-          .cue-kicker {{ color:#987d5a; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
+          .cue-kicker {{ color:#71583d; letter-spacing:.16em; font-size:{0.76 * scale:.3f}rem; font-weight:700; }}
           .cue-text {{ color:#2d2118; font-family:Georgia, 'Times New Roman', serif; font-size:{2.05 * scale:.3f}rem; line-height:1.2; margin-top:12px; overflow-wrap:anywhere; }}
-          .stage-line {{ color:#806f59; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
-          .compact-stats {{ color:#806f59; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
-          .sync-line {{ color:#897761; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
-          .keyboard-hint {{ color:#95836d; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
+          .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
+          .compact-stats {{ color:#62503e; text-align:center; font-size:{0.82 * scale:.3f}rem; margin-top:12px; }}
+          .sync-line {{ color:#695642; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:3px; }}
+          .keyboard-hint {{ color:#6d5945; text-align:center; font-size:.72rem; margin:-.15rem 0 .25rem; }}
           .answer-diff {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; line-height:1.8; font-size:{0.98 * scale:.3f}rem; }}
-          .diff-label {{ display:inline-block; min-width:4.4rem; color:#806f59; font-size:.82em; font-weight:700; }}
+          .diff-label {{ display:inline-block; min-width:4.4rem; color:#62503e; font-size:.82em; font-weight:700; }}
           .diff-wrong {{ background:#f6d7d0; color:#8b2f20; border-radius:4px; padding:1px 2px; text-decoration:line-through; text-decoration-thickness:1px; }}
           .diff-right {{ background:#e4efd5; color:#355b24; border-radius:4px; padding:1px 2px; font-weight:700; }}
-          .distance-line {{ color:#806f59; font-size:.78em; margin-top:2px; }}
+          .distance-line {{ color:#62503e; font-size:.78em; margin-top:2px; }}
           .verb-answer {{ background:rgba(255,255,255,.72); border:1px solid #ddcbaa; border-radius:10px; padding:9px 11px; margin:7px 0 8px; font-size:{1.02 * scale:.3f}rem; line-height:1.7; }}
           .verb-highlight {{ background:#f5dfaa; color:#5a3915; border-radius:4px; padding:1px 3px; font-weight:800; }}
 
@@ -1560,7 +1573,7 @@ def apply_app_css(scale: float) -> None:
           .stButton button, .stFormSubmitButton button {{ font-size:{0.95 * scale:.3f}rem !important; border-radius:10px !important; min-height:2.7rem; }}
           [data-testid="stRadio"] label p {{ font-size:{0.88 * scale:.3f}rem !important; }}
           div[data-testid="stRadio"] > div {{ gap:.45rem; flex-wrap:wrap; }}
-          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#806f59 !important; font-size:{0.80 * scale:.3f}rem !important; }}
+          .stCaptionContainer, [data-testid="stCaptionContainer"] {{ color:#62503e !important; font-size:{0.80 * scale:.3f}rem !important; }}
 
           /* Keep the small A− / A+ controls in one row on narrow Android screens. */
           .st-key-font_controls [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center !important; }}
@@ -1996,15 +2009,28 @@ if page == "Practice":
                 st.rerun()
 
         if fb:
-            # Keep Next immediately beside the answer controls visually instead
-            # of placing it below all feedback/pronunciation content.
-            st.button(
-                "Next →",
-                type="primary",
-                on_click=advance_practice,
-                args=(mode, verb_tense),
-                key=f"next_{item['id']}_{idx}",
-            )
+            # Keep the two post-answer actions together: Pronounce on the left,
+            # Next on the right. Forvo is useful mainly for single words, so it
+            # appears only for word items.
+            pronounce_col, next_col = st.columns([1.15, 1], gap="small")
+            with pronounce_col:
+                pronunciation_box(
+                    str(fb.get("correct", "")),
+                    f"practice-{idx}",
+                    show_forvo=(
+                        (not is_verb_item(item))
+                        and str(item.get("item_type", "")).lower() == "word"
+                    ),
+                )
+            with next_col:
+                st.button(
+                    "Next →",
+                    type="primary",
+                    use_container_width=True,
+                    on_click=advance_practice,
+                    args=(mode, verb_tense),
+                    key=f"next_{item['id']}_{idx}",
+                )
 
             labels = {
                 "correct": "✅ Correct",
@@ -2074,7 +2100,7 @@ if page == "Practice":
             elif item.get("example_nl"):
                 st.caption(str(item.get("example_nl")))
 
-            pronunciation_box(str(fb.get("correct", "")), f"practice-{idx}")
+
 
 
     usage = usage_display()
