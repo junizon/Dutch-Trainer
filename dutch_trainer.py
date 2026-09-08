@@ -1810,7 +1810,12 @@ if page == "Practice":
                 # unfinished card so reopening the app continues from there.
                 next_id = str(queue[idx + 1].get("id")) if idx + 1 < len(queue) else None
                 save_resume_state_async(mode, next_id, verb_tense)
-                fb = st.session_state.practice_feedback
+
+                # Immediately rerun from local session state so the answer box
+                # disappears before the correct answer is shown. The cloud save
+                # has already been queued in the background, so this rerun does
+                # not wait for Supabase.
+                st.rerun()
 
         if fb:
             # Keep Next immediately beside the answer controls visually instead
