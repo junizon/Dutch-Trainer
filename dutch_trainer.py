@@ -1165,6 +1165,118 @@ def render_activity_banner() -> None:
 # AI generation
 # -----------------------------------------------------------------------------
 
+def _normalise_generation_text(text: str, lexical: bool = False) -> str:
+    """Canonicalise Dutch text for duplicate checks without changing saved text."""
+    value = html.unescape(str(text or "")).casefold().strip()
+    value = value.replace("’", "'").replace("`", "'")
+    value = re.sub(r"[^\w\s'-]", " ", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", " ", value).strip()
+    if lexical:
+        value = re.sub(r"^(?:de|het|een)\s+", "", value).strip()
+    return value
+
+
+def _generation_identity(item_type: str, dutch: str) -> str:
+    """Use one namespace for words and verbs, and another for sentences."""
+    lexical = item_type in {"word", "verb"}
+    namespace = "lexeme" if lexical else "sentence"
+    return f"{namespace}|{_normalise_generation_text(dutch, lexical=lexical)}"
+
+
+def _item_generation_identity(item: dict[str, Any]) -> str:
+    if is_verb_item(item):
+        data = verb_data(item)
+        lemma = str(data.get("lemma", "") if data else "").strip() or str(item.get("dutch", ""))
+        return _generation_identity("verb", lemma)
+    return _generation_identity(str(item.get("item_type", "word")), str(item.get("dutch", "")))
+
+
+def known_generation_items() -> list[dict[str, str]]:
+    """Return material the learner explicitly marked as already known."""
+    raw = get_setting("generation_known_items", [])
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, str]] = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            item_type = str(entry.get("item_type", "word"))
+            dutch = str(entry.get("dutch", "")).strip()
+            english = str(entry.get("english", "")).strip()
+        else:
+            # Backward-compatible with any manually created list of Dutch words.
+            item_type = "word"
+            dutch = str(entry).strip()
+            english = ""
+        if dutch:
+            out.append({"item_type": item_type, "dutch": dutch, "english": english})
+    return out
+
+
+def remember_known_generation_items(items: list[dict[str, Any]]) -> int:
+    """Persist explicit 'already know' choices in the existing settings table."""
+    existing = known_generation_items()
+    by_identity = {
+        _generation_identity(row["item_type"], row["dutch"]): row
+        for row in existing
+    }
+    before = len(by_identity)
+
+    for item in items:
+        if is_verb_item(item):
+            data = verb_data(item)
+            item_type = "verb"
+            dutch = str(data.get("lemma", "") if data else "").strip() or str(item.get("dutch", "")).strip()
+        else:
+            item_type = str(item.get("item_type", "word"))
+            dutch = str(item.get("dutch", "")).strip()
+        if not dutch:
+            continue
+        identity = _generation_identity(item_type, dutch)
+        by_identity[identity] = {
+            "item_type": item_type,
+            "dutch": dutch,
+            "english": str(item.get("english", "")).strip(),
+        }
+
+    records = list(by_identity.values())
+    set_setting("generation_known_items", records)
+    return len(by_identity) - before
+
+
+def generation_exclusions(namespaces: set[str]) -> tuple[set[str], list[str]]:
+    """Collect saved, retired and explicitly known material for AI and local checks."""
+    identities: set[str] = set()
+    labels: list[str] = []
+
+    try:
+        saved_items = fetch_items(include_inactive=True)
+    except Exception:
+        saved_items = []
+    try:
+        known_items = known_generation_items()
+    except Exception:
+        known_items = []
+
+    for item in saved_items:
+        identity = _item_generation_identity(item)
+        namespace = identity.split("|", 1)[0]
+        if namespace not in namespaces or identity in identities or identity.endswith("|"):
+            continue
+        identities.add(identity)
+        label_type = "verb" if is_verb_item(item) else str(item.get("item_type", "item"))
+        labels.append(f"{label_type}: {str(item.get('dutch', '')).strip()}")
+
+    for item in known_items:
+        identity = _generation_identity(item["item_type"], item["dutch"])
+        namespace = identity.split("|", 1)[0]
+        if namespace not in namespaces or identity in identities or identity.endswith("|"):
+            continue
+        identities.add(identity)
+        labels.append(f"known {item['item_type']}: {item['dutch']}")
+
+    return identities, labels
+
 def generate_items(
     level: str,
     topic: str,
@@ -1176,6 +1288,8 @@ def generate_items(
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
     client = OpenAI(api_key=OPENAI_KEY)
+    namespaces = ({"lexeme"} if "word" in kinds else set()) | ({"sentence"} if "sentence" in kinds else set())
+    excluded_identities, exclusion_labels = generation_exclusions(namespaces)
     schema = {
         "type": "object",
         "properties": {
@@ -1205,11 +1319,22 @@ def generate_items(
         "additionalProperties": False,
     }
 
-    prompt = f"""
-Create exactly {count} useful Dutch learning items for an adult learner at CEFR {level}.
+    out: list[dict[str, Any]] = []
+    # A model can occasionally ignore an exclusion. Local filtering is authoritative;
+    # retry only for the missing places so the requested batch is still filled.
+    for _attempt in range(3):
+        remaining = count - len(out)
+        if remaining <= 0:
+            break
+        exclusion_note = "\n".join(f"- {label}" for label in exclusion_labels) or "- none yet"
+        prompt = f"""
+Create exactly {remaining} useful Dutch learning items for an adult learner at CEFR {level}.
 Allowed item types: {', '.join(kinds)}.
 Sentence context: {sentence_context}.
 Optional extra topic: {topic or 'none'}.
+
+MATERIAL ALREADY SAVED, RETIRED, OR MARKED AS KNOWN (do not generate it again):
+{exclusion_note}
 
 Requirements:
 - Natural contemporary Dutch used in the Netherlands.
@@ -1225,46 +1350,52 @@ Requirements:
 - Do not generate Chinese translations.
 - example_nl/example_en are optional in spirit but must be strings; for a sentence item, they may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
-- Avoid duplicates or trivial variants of the same item.
+- Avoid duplicates, trivial variants, and inflection-only repeats of excluded material.
 - Do not include pronunciation respellings.
 """.strip()
 
-    response = client.responses.create(
-        model=OPENAI_MODEL,
-        input=prompt,
-        store=False,
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "dutch_trainer_items",
-                "strict": True,
-                "schema": schema,
-            }
-        },
-    )
-    data = json.loads(response.output_text)
-    out = []
-    for raw in data.get("items", []):
-        if raw.get("item_type") not in kinds:
-            continue
-        dutch = str(raw.get("dutch", "")).strip()
-        english = str(raw.get("english", "")).strip()
-        if not dutch or not english:
-            continue
-        out.append({
-            "item_type": raw["item_type"],
-            "dutch": dutch,
-            "english": english,
-            "example_nl": str(raw.get("example_nl", "")).strip(),
-            "example_en": str(raw.get("example_en", "")).strip(),
-            "accepted_answers": raw.get("accepted_answers") or [],
-            "level": level,
-            "theme": str(raw.get("theme", topic or "general")).strip() or "general",
-            "notes": str(raw.get("notes", "")).strip(),
-            "source": "ai",
-            "active": True,
-        })
-    return out
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt,
+            store=False,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "dutch_trainer_items",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        )
+        data = json.loads(response.output_text)
+        for raw in data.get("items", []):
+            if raw.get("item_type") not in kinds:
+                continue
+            dutch = str(raw.get("dutch", "")).strip()
+            english = str(raw.get("english", "")).strip()
+            if not dutch or not english:
+                continue
+            identity = _generation_identity(str(raw["item_type"]), dutch)
+            if identity in excluded_identities or identity.endswith("|"):
+                continue
+            excluded_identities.add(identity)
+            exclusion_labels.append(f"{raw['item_type']}: {dutch}")
+            out.append({
+                "item_type": raw["item_type"],
+                "dutch": dutch,
+                "english": english,
+                "example_nl": str(raw.get("example_nl", "")).strip(),
+                "example_en": str(raw.get("example_en", "")).strip(),
+                "accepted_answers": raw.get("accepted_answers") or [],
+                "level": level,
+                "theme": str(raw.get("theme", topic or "general")).strip() or "general",
+                "notes": str(raw.get("notes", "")).strip(),
+                "source": "ai",
+                "active": True,
+            })
+            if len(out) >= count:
+                break
+    return out[:count]
 
 
 def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, Any]]:
@@ -1272,19 +1403,9 @@ def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, An
     if not OPENAI_KEY or OpenAI is None:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
-    # Avoid repeatedly generating verbs the learner already has. This lookup only
-    # happens when Generate is pressed; it is not part of ordinary practice.
-    existing_lemmas: list[str] = []
-    try:
-        for saved in fetch_items(include_inactive=True):
-            data = verb_data(saved)
-            lemma = str(data.get("lemma", "") if data else "").strip().lower()
-            if lemma:
-                existing_lemmas.append(lemma)
-    except Exception:
-        # Generation should still work if the duplicate-avoidance lookup fails.
-        existing_lemmas = []
-    existing_lemmas = sorted(set(existing_lemmas))[-120:]
+    # Words and verbs share one lexical exclusion pool, including retired and
+    # explicitly known material. This lookup runs only when Generate is pressed.
+    excluded_identities, exclusion_labels = generation_exclusions({"lexeme"})
 
     client = OpenAI(api_key=OPENAI_KEY)
     exercise_schema = {
@@ -1321,7 +1442,7 @@ def generate_verb_items(level: str, topic: str, count: int) -> list[dict[str, An
         "additionalProperties": False,
     }
 
-    existing_note = ", ".join(existing_lemmas) if existing_lemmas else "none yet"
+    existing_note = "\n".join(f"- {label}" for label in exclusion_labels) or "- none yet"
 
     if level == "A2":
         level_guidance = """
@@ -1405,6 +1526,10 @@ For EACH verb:
         exercises = raw.get("exercises") or []
         if not infinitive or not english or not isinstance(exercises, list):
             continue
+        identity = _generation_identity("verb", infinitive)
+        if identity in excluded_identities or identity.endswith("|"):
+            continue
+        excluded_identities.add(identity)
         valid = []
         for ex in exercises:
             if not isinstance(ex, dict):
@@ -2335,6 +2460,7 @@ elif page == "Generate":
                 try:
                     with st.spinner("Generating verb drills…"):
                         st.session_state.generated_preview = generate_verb_items(level, topic, count)
+                        st.session_state.generation_batch_id = time.time_ns()
                     st.success(f"Generated {len(st.session_state.generated_preview)} verb set(s). Review them before saving.")
                 except Exception as exc:
                     st.error(f"Generation failed: {exc}")
@@ -2370,26 +2496,46 @@ elif page == "Generate":
                             st.session_state.generated_preview = generate_items(
                                 level, topic, sentence_context, count, kinds
                             )
+                            st.session_state.generation_batch_id = time.time_ns()
                         st.success(f"Generated {len(st.session_state.generated_preview)} items. Review them before saving.")
                     except Exception as exc:
                         st.error(f"Generation failed: {exc}")
 
         preview = st.session_state.get("generated_preview", [])
         if preview:
-            chosen_ids = []
+            st.caption(
+                "Choose **Add to trainer** for material you want to practise. "
+                "Choose **Already know** to prevent it from being generated again."
+            )
+            chosen_ids: list[int] = []
+            known_ids: list[int] = []
+            batch_id = st.session_state.get("generation_batch_id", "current")
             for i, item in enumerate(preview):
                 if is_verb_item(item):
                     n_forms = len(verb_exercises(item, "Mixed"))
                     label = f"Verb: {item['dutch']} — {item['english']} · {n_forms} sentence drills"
                 else:
                     label = f"{item['item_type'].title()}: {item['dutch']} — {item['english']}"
-                if st.checkbox(label, value=True, key=f"gen_keep_{i}"):
+                choice = st.radio(
+                    label,
+                    ["Add to trainer", "Already know", "Skip"],
+                    horizontal=True,
+                    key=f"gen_choice_{batch_id}_{i}",
+                )
+                if choice == "Add to trainer":
                     chosen_ids.append(i)
-            if st.button("Save selected to trainer", type="primary"):
+                elif choice == "Already know":
+                    known_ids.append(i)
+            if st.button("Save choices", type="primary"):
                 rows = [preview[i] for i in chosen_ids]
+                known_rows = [preview[i] for i in known_ids]
                 try:
                     added, skipped = insert_items(rows)
-                    st.success(f"Saved {added} item(s)." + (f" Skipped duplicates: {', '.join(skipped)}" if skipped else ""))
+                    remembered = remember_known_generation_items(known_rows) if known_rows else 0
+                    message = f"Saved {added} item(s) to practise. Remembered {remembered} as already known."
+                    if skipped:
+                        message += f" Skipped duplicates: {', '.join(skipped)}"
+                    st.success(message)
                     st.session_state.generated_preview = []
                     st.rerun()
                 except Exception as exc:
