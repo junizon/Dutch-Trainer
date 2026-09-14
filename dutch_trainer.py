@@ -723,8 +723,9 @@ def save_review_async(
     progress = dict(item.get("_progress") or _default_progress(str(item["id"])))
     was_retired = not bool(item.get("active", True)) or progress.get("status") == "mastered"
     before = int(progress.get("interval_days") or 0)
+    was_due = str(progress.get("due_on") or local_today().isoformat()) <= local_today().isoformat()
 
-    if extra_practice and not was_retired and grade in {"correct", "typo"}:
+    if extra_practice and not was_retired and not was_due and grade in {"correct", "typo"}:
         # Successful optional practice should reinforce the learner without
         # moving the carefully spaced due date or advancing retirement.
         values = dict(_default_progress(str(item["id"])))
@@ -793,8 +794,8 @@ def practice_candidates(
     today = local_today().isoformat()
     missing_progress: list[dict[str, Any]] = []
 
-    stats = {"in_progress": 0, "retired": 0, "due": 0, "total": 0}
-    scored: list[tuple[tuple[int, int, str, float], dict[str, Any]]] = []
+    stats = {"in_progress": 0, "retired": 0, "due": 0, "seen_today": 0, "total": 0}
+    scored: list[tuple[tuple[int, str, float, int], dict[str, Any]]] = []
 
     for raw in items:
         if item_types and raw.get("item_type") not in item_types:
@@ -803,6 +804,9 @@ def practice_candidates(
         stats["total"] += 1
         p = prog.get(str(item["id"]))
         active = bool(item.get("active", True))
+
+        if p and _review_local_date(str(p.get("last_reviewed_at") or "")) == local_today():
+            stats["seen_today"] += 1
 
         if active:
             stats["in_progress"] += 1
@@ -819,7 +823,7 @@ def practice_candidates(
             if not active:
                 continue
             due = today
-            pri = (2, 0, due, random.random())
+            pri = (2, due, random.random(), 0)
         else:
             due = str(p.get("due_on") or today)
             if due > today:
@@ -827,9 +831,11 @@ def practice_candidates(
             status = str(p.get("status") or "new")
             difficulty = int(p.get("difficulty") or 0)
             if not active and status == "mastered":
-                pri = (0, -difficulty, due, random.random())
+                pri = (0, due, random.random(), -difficulty)
             elif active:
-                pri = (1, -difficulty, due, random.random())
+                # Randomize cards sharing a due date so difficult material is
+                # distributed through the round instead of dominating its start.
+                pri = (1, due, random.random(), -difficulty)
             else:
                 continue
 
@@ -858,8 +864,8 @@ def extra_practice_candidates(
         if item.get("id") is not None and item.get("_progress")
     }
 
-    stats = {"in_progress": 0, "retired": 0, "due": 0, "total": 0}
-    scored: list[tuple[tuple[int, str, float], dict[str, Any]]] = []
+    stats = {"in_progress": 0, "retired": 0, "due": 0, "seen_today": 0, "total": 0}
+    scored: list[tuple[tuple[str, float, int], dict[str, Any]]] = []
     for raw in items:
         if item_types and raw.get("item_type") not in item_types:
             continue
@@ -867,6 +873,8 @@ def extra_practice_candidates(
         stats["total"] += 1
         active = bool(item.get("active", True))
         p = local_progress.get(str(item.get("id"))) or prog.get(str(item.get("id")))
+        if p and _review_local_date(str(p.get("last_reviewed_at") or "")) == local_today():
+            stats["seen_today"] += 1
         if active:
             stats["in_progress"] += 1
         elif p and p.get("status") == "mastered":
@@ -875,10 +883,14 @@ def extra_practice_candidates(
             continue
         if not p:
             p = _default_progress(str(item["id"]))
+        if str(p.get("due_on") or local_today().isoformat()) <= local_today().isoformat():
+            stats["due"] += 1
         item["_progress"] = dict(p)
         difficulty = int(p.get("difficulty") or 0)
         last_reviewed = str(p.get("last_reviewed_at") or "")
-        scored.append(((-difficulty, last_reviewed, random.random()), item))
+        # Older reviews come first; randomness spreads difficult items instead
+        # of clustering them at the front of every extra-practice round.
+        scored.append(((last_reviewed, random.random(), -difficulty), item))
 
     scored.sort(key=lambda x: x[0])
     return [x[1] for x in scored], stats
@@ -1891,6 +1903,8 @@ def load_practice(mode: str, verb_tense: str = "Mixed") -> None:
     st.session_state.practice_stats = stats
     st.session_state.practice_index = 0
     st.session_state.practice_feedback = None
+    st.session_state.practice_repeat_counts = {}
+    st.session_state.practice_due_unresolved = {str(item.get("id")) for item in queue}
     st.session_state.practice_loaded_key = f"{mode}|{verb_tense}"
     st.session_state.extra_practice_active = False
     st.session_state.extra_practice_until = 0.0
@@ -1925,6 +1939,8 @@ def load_extra_practice(
     st.session_state.practice_stats = stats
     st.session_state.practice_index = 0
     st.session_state.practice_feedback = None
+    st.session_state.practice_repeat_counts = {}
+    st.session_state.practice_due_unresolved = set()
     st.session_state.practice_loaded_key = f"{mode}|{verb_tense}"
     st.session_state.extra_practice_active = True
     st.session_state.extra_practice_minutes = int(minutes)
@@ -1962,6 +1978,18 @@ def advance_practice(mode: str, verb_tense: str = "Mixed") -> None:
     st.session_state.practice_feedback = None
     next_id = str(queue[idx].get("id")) if idx < len(queue) else None
     save_resume_state_async(mode, next_id, verb_tense)
+
+
+def append_retry_once(queue: list[dict[str, Any]], item: dict[str, Any]) -> bool:
+    """Append one end-of-round retry, never repeated retries of the same item."""
+    repeat_counts = dict(st.session_state.get("practice_repeat_counts", {}))
+    repeat_key = str(item.get("id"))
+    if int(repeat_counts.get(repeat_key, 0)) >= 1:
+        return False
+    queue.append(item)
+    repeat_counts[repeat_key] = 1
+    st.session_state.practice_repeat_counts = repeat_counts
+    return True
 
 
 def install_keyboard_shortcuts() -> None:
@@ -2270,9 +2298,16 @@ if page == "Practice":
 
     if "practice_queue" not in st.session_state:
         st.session_state.practice_queue = []
-        st.session_state.practice_stats = {"in_progress": 0, "retired": 0, "due": 0, "total": 0}
+        st.session_state.practice_stats = {
+            "in_progress": 0,
+            "retired": 0,
+            "due": 0,
+            "seen_today": 0,
+            "total": 0,
+        }
         st.session_state.practice_index = 0
         st.session_state.practice_feedback = None
+        st.session_state.practice_repeat_counts = {}
         st.session_state.practice_loaded_key = None
 
     loaded_key = f"{mode}|{verb_tense}"
@@ -2407,6 +2442,14 @@ if page == "Practice":
 
             if submit or dont:
                 grade = "dont_know" if dont else classify_answer_values(correct_answer, accepted_answers, typed)
+                was_seen_today = (
+                    _review_local_date(str(item_progress.get("last_reviewed_at") or ""))
+                    == local_today()
+                )
+                was_due_now = (
+                    str(item_progress.get("due_on") or local_today().isoformat())
+                    <= local_today().isoformat()
+                )
                 result = save_review_async(
                     item,
                     typed,
@@ -2415,6 +2458,17 @@ if page == "Practice":
                     current_target,
                     extra_practice=extra_active,
                 )
+                if not was_seen_today:
+                    stats["seen_today"] = int(stats.get("seen_today", 0)) + 1
+                is_due_now = (
+                    str((item.get("_progress") or {}).get("due_on") or local_today().isoformat())
+                    <= local_today().isoformat()
+                )
+                if was_due_now and not is_due_now:
+                    stats["due"] = max(0, int(stats.get("due", 0)) - 1)
+                elif not was_due_now and is_due_now:
+                    stats["due"] = int(stats.get("due", 0)) + 1
+                st.session_state.practice_stats = stats
                 transition = result.get("transition", "")
                 if verb_exercise:
                     if grade in {"wrong", "dont_know", "typo"}:
@@ -2437,14 +2491,10 @@ if page == "Practice":
                     "extra_practice": extra_active,
                 }
 
-                # Real mistakes return after a few other cards. No second server rerun
-                # is forced here; feedback renders immediately in this same run.
-                if grade in {"wrong", "dont_know"}:
-                    insert_at = min(len(queue), idx + 4)
-                    queue.insert(insert_at, item)
-                elif grade == "typo":
-                    insert_at = min(len(queue), idx + 7)
-                    queue.insert(insert_at, item)
+                # Give broad coverage first. A mistaken item is appended only
+                # once per round, after the remaining unseen cards.
+                if grade in {"wrong", "dont_know", "typo"}:
+                    append_retry_once(queue, item)
                 elif transition in {"retire", "retired_pass", "retired_typo"}:
                     queue = queue[:idx + 1] + [
                         q for q in queue[idx + 1:] if str(q.get("id")) != str(item.get("id"))
@@ -2568,7 +2618,9 @@ if page == "Practice":
     pending_n, _ = drain_pending_syncs()
     sync_text = "☁️ Saving…" if pending_n else "☁️ Synced"
     st.markdown(
-        f'<div class="compact-stats"><strong>{stats.get("in_progress", 0)}</strong> in progress · '
+        f'<div class="compact-stats"><strong>{stats.get("in_progress", 0)}</strong> active · '
+        f'<strong>{stats.get("due", 0)}</strong> due today · '
+        f'<strong>{stats.get("seen_today", 0)}</strong> seen today · '
         f'<strong>{stats.get("retired", 0)}</strong> retired · '
         f'<strong>{_format_duration(usage["today"])}</strong> today · '
         f'<strong>{_format_duration(usage["total"])}</strong> total</div>'
