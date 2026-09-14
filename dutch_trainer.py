@@ -717,11 +717,27 @@ def save_review_async(
     grade: str,
     prompt: str,
     target: int,
+    extra_practice: bool = False,
 ) -> dict[str, Any]:
     """Update local state immediately; persist to Supabase in the background."""
     progress = dict(item.get("_progress") or _default_progress(str(item["id"])))
     was_retired = not bool(item.get("active", True)) or progress.get("status") == "mastered"
-    values, before, transition = schedule_after(progress, grade, target, was_retired=was_retired)
+    before = int(progress.get("interval_days") or 0)
+
+    if extra_practice and not was_retired and grade in {"correct", "typo"}:
+        # Successful optional practice should reinforce the learner without
+        # moving the carefully spaced due date or advancing retirement.
+        values = dict(_default_progress(str(item["id"])))
+        values.update(progress)
+        values["attempts"] = int(values.get("attempts") or 0) + 1
+        values[grade] = int(values.get(grade) or 0) + 1
+        values["last_grade"] = grade
+        values["last_reviewed_at"] = datetime.now(_trainer_tz()).isoformat()
+        transition = f"extra_{grade}"
+    else:
+        # A mistake during extra practice is real evidence that the item needs
+        # attention, so it returns to today's learning pool as usual.
+        values, before, transition = schedule_after(progress, grade, target, was_retired=was_retired)
     after = int(values["interval_days"])
 
     # Local state becomes authoritative for the current session immediately.
@@ -763,6 +779,7 @@ def save_review_async(
         "interval_after": after,
         "successes": int(values.get("consecutive_correct") or 0),
         "target": target,
+        "extra_practice": extra_practice,
     }
 
 
@@ -824,6 +841,47 @@ def practice_candidates(
 
     scored.sort(key=lambda x: x[0])
     return [x[1] for x in scored[:limit]], stats
+
+
+def extra_practice_candidates(
+    item_types: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Return active material even when its next scheduled review is later."""
+    items = fetch_items(include_inactive=True)
+    prog = fetch_progress()
+
+    # Recent local answers may still be travelling to Supabase in the background.
+    # Prefer those local progress values so extra practice never rewinds a card.
+    local_progress = {
+        str(item.get("id")): dict(item.get("_progress") or {})
+        for item in st.session_state.get("practice_queue", [])
+        if item.get("id") is not None and item.get("_progress")
+    }
+
+    stats = {"in_progress": 0, "retired": 0, "due": 0, "total": 0}
+    scored: list[tuple[tuple[int, str, float], dict[str, Any]]] = []
+    for raw in items:
+        if item_types and raw.get("item_type") not in item_types:
+            continue
+        item = dict(raw)
+        stats["total"] += 1
+        active = bool(item.get("active", True))
+        p = local_progress.get(str(item.get("id"))) or prog.get(str(item.get("id")))
+        if active:
+            stats["in_progress"] += 1
+        elif p and p.get("status") == "mastered":
+            stats["retired"] += 1
+        if not active:
+            continue
+        if not p:
+            p = _default_progress(str(item["id"]))
+        item["_progress"] = dict(p)
+        difficulty = int(p.get("difficulty") or 0)
+        last_reviewed = str(p.get("last_reviewed_at") or "")
+        scored.append(((-difficulty, last_reviewed, random.random()), item))
+
+    scored.sort(key=lambda x: x[0])
+    return [x[1] for x in scored], stats
 
 
 def migrate_scheduler_v2() -> None:
@@ -1834,8 +1892,66 @@ def load_practice(mode: str, verb_tense: str = "Mixed") -> None:
     st.session_state.practice_index = 0
     st.session_state.practice_feedback = None
     st.session_state.practice_loaded_key = f"{mode}|{verb_tense}"
+    st.session_state.extra_practice_active = False
+    st.session_state.extra_practice_until = 0.0
+    st.session_state.extra_practice_just_finished = False
     next_id = str(queue[0].get("id")) if queue else None
     save_resume_state_async(mode, next_id, verb_tense)
+
+
+def load_extra_practice(
+    mode: str,
+    verb_tense: str,
+    minutes: int,
+    keep_deadline: bool = False,
+) -> bool:
+    """Start or refill a timed optional-practice round."""
+    queue, stats = extra_practice_candidates(practice_type_set(mode))
+    if mode == "Verbs":
+        queue = [item for item in queue if is_verb_item(item) and verb_exercises(item, verb_tense)]
+        stats["total"] = len(queue)
+        stats["in_progress"] = len(queue)
+    elif mode == "Sentences":
+        queue = [item for item in queue if not is_verb_item(item)]
+        stats["total"] = len(queue)
+        stats["in_progress"] = len(queue)
+
+    if not queue:
+        return False
+
+    # Difficulty and older reviews are favoured, with random tie-breaking.
+    # Refill creates another round if the selected time outlasts one pass.
+    st.session_state.practice_queue = queue
+    st.session_state.practice_stats = stats
+    st.session_state.practice_index = 0
+    st.session_state.practice_feedback = None
+    st.session_state.practice_loaded_key = f"{mode}|{verb_tense}"
+    st.session_state.extra_practice_active = True
+    st.session_state.extra_practice_minutes = int(minutes)
+    st.session_state.extra_practice_just_finished = False
+    if not keep_deadline:
+        st.session_state.extra_practice_until = time.time() + int(minutes) * 60
+    save_resume_state_async(mode, str(queue[0].get("id")), verb_tense)
+    return True
+
+
+def render_extra_practice_choices(mode: str, verb_tense: str) -> None:
+    st.caption(
+        "Want to keep going? Correct answers in extra practice leave the spaced-review schedule unchanged. "
+        "Mistakes return the item to active learning."
+    )
+    cols = st.columns(3, gap="small")
+    for col, minutes in zip(cols, (5, 10, 15)):
+        with col:
+            if st.button(
+                f"{minutes} more min",
+                key=f"extra_practice_{minutes}",
+                use_container_width=True,
+            ):
+                if load_extra_practice(mode, verb_tense, minutes):
+                    st.rerun()
+                else:
+                    st.warning(f"No active material is available in {mode.lower()}.")
 
 
 def advance_practice(mode: str, verb_tense: str = "Mixed") -> None:
@@ -2167,6 +2283,25 @@ if page == "Practice":
     queue = st.session_state.practice_queue
     idx = int(st.session_state.practice_index)
     stats = st.session_state.practice_stats
+    extra_active = bool(st.session_state.get("extra_practice_active", False))
+    extra_until = float(st.session_state.get("extra_practice_until", 0.0) or 0.0)
+
+    # Finish a timed extra session cleanly after the current answer feedback.
+    if extra_active and extra_until and time.time() >= extra_until and not st.session_state.practice_feedback:
+        st.session_state.practice_queue = []
+        st.session_state.practice_index = 0
+        st.session_state.extra_practice_active = False
+        st.session_state.extra_practice_just_finished = True
+        queue = []
+        idx = 0
+        extra_active = False
+
+    # If one pass through the active pool was quicker than the selected time,
+    # begin another shuffled round instead of ending early.
+    if extra_active and queue and idx >= len(queue) and time.time() < extra_until:
+        minutes = int(st.session_state.get("extra_practice_minutes", 10) or 10)
+        if load_extra_practice(mode, verb_tense, minutes, keep_deadline=True):
+            st.rerun()
 
     if not queue:
         mode, verb_tense, current_target, refresh = render_practice_options(
@@ -2175,13 +2310,17 @@ if page == "Practice":
         if refresh:
             load_practice(mode, verb_tense)
             st.rerun()
-        st.info(
-            f"Nothing is due in {mode.lower()} right now. Items you answered correctly may be waiting for their next spaced review; "
-            "wrong, typo, and “I don't know” items stay available today."
-        )
+        if st.session_state.get("extra_practice_just_finished", False):
+            st.success("Extra practice complete. Your regular spaced-review dates were preserved.")
+        else:
+            st.info(
+                f"Today's scheduled reviews are complete in {mode.lower()}. "
+                "Your active items are waiting for their next spaced review."
+            )
         if st.button("Check again", type="primary"):
             load_practice(mode, verb_tense)
             st.rerun()
+        render_extra_practice_choices(mode, verb_tense)
     elif idx >= len(queue):
         mode, verb_tense, current_target, refresh = render_practice_options(
             current_target, mode_options, tense_options
@@ -2189,10 +2328,11 @@ if page == "Practice":
         if refresh:
             load_practice(mode, verb_tense)
             st.rerun()
-        st.success("Session finished.")
-        if st.button("Start another session", type="primary", use_container_width=True):
+        st.success("Today's scheduled reviews are complete.")
+        if st.button("Check for newly due items", type="primary", use_container_width=True):
             load_practice(mode, verb_tense)
             st.rerun()
+        render_extra_practice_choices(mode, verb_tense)
     else:
         item = queue[idx]
         item_progress = dict(item.get("_progress") or _default_progress(str(item["id"])))
@@ -2209,7 +2349,11 @@ if page == "Practice":
             verb_label = str(item.get("item_type", "item")).upper()
 
         item_retired = not bool(item.get("active", True)) or item_progress.get("status") == "mastered"
-        if item_retired:
+        if extra_active:
+            seconds_left = max(0, int(extra_until - time.time()))
+            minutes_left = max(1, (seconds_left + 59) // 60)
+            stage = f"Extra practice · about {minutes_left} min left"
+        elif item_retired:
             stage = f"Retired review · {int(item_progress.get('interval_days') or 0)}-day interval"
         else:
             stage = f"{int(item_progress.get('consecutive_correct') or 0)}/{current_target} recalls toward retirement"
@@ -2263,7 +2407,14 @@ if page == "Practice":
 
             if submit or dont:
                 grade = "dont_know" if dont else classify_answer_values(correct_answer, accepted_answers, typed)
-                result = save_review_async(item, typed, grade, cue, current_target)
+                result = save_review_async(
+                    item,
+                    typed,
+                    grade,
+                    cue,
+                    current_target,
+                    extra_practice=extra_active,
+                )
                 transition = result.get("transition", "")
                 if verb_exercise:
                     if grade in {"wrong", "dont_know", "typo"}:
@@ -2283,6 +2434,7 @@ if page == "Practice":
                     "verb_tense": verb_exercise.get("tense") if verb_exercise else "",
                     "verb_subject": verb_exercise.get("subject") if verb_exercise else "",
                     "verb_parts": verb_exercise.get("verb_parts") if verb_exercise else [],
+                    "extra_practice": extra_active,
                 }
 
                 # Real mistakes return after a few other cards. No second server rerun
@@ -2355,6 +2507,8 @@ if page == "Practice":
                 st.caption(f"Still retired; a closer check is scheduled in {fb.get('interval_after')} days.")
             elif transition == "relearn":
                 st.caption("This retired item was forgotten, so it has returned to the learning pool.")
+            elif transition in {"extra_correct", "extra_typo"}:
+                st.caption("Extra practice: your next spaced-review date stays unchanged.")
             elif fb.get("grade") == "correct":
                 st.caption(f"Memory strength: {fb.get('successes')}/{fb.get('target')} spaced correct recalls.")
 
