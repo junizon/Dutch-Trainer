@@ -2391,15 +2391,6 @@ if not st.session_state.get("scheduler_migration_v3_checked"):
         st.session_state.scheduler_migration_note = str(exc)
     st.session_state.scheduler_migration_v3_checked = True
 
-# One-time cleanup of existing vocabulary cards whose English gloss is too broad
-# to identify the intended Dutch answer. The user explicitly approved this audit.
-if not st.session_state.get("word_context_audit_checked"):
-    try:
-        run_word_context_audit_once()
-    except Exception as exc:
-        st.session_state.word_context_audit_note = str(exc)
-    st.session_state.word_context_audit_checked = True
-
 current_scale = font_scale()
 apply_app_css(current_scale)
 
@@ -2449,15 +2440,6 @@ render_activity_banner()
 
 if st.session_state.get("scheduler_migration_note"):
     st.caption(f"Learning-schedule migration skipped: {st.session_state.scheduler_migration_note}")
-
-if st.session_state.get("word_context_audit_result"):
-    audit_result = st.session_state.word_context_audit_result
-    st.success(
-        f"Word-context audit complete: checked {audit_result.get('checked', 0)} word cards and "
-        f"added clearer English context to {audit_result.get('fixed', 0)} ambiguous card(s)."
-    )
-if st.session_state.get("word_context_audit_note"):
-    st.caption(f"Word-context audit will retry later: {st.session_state.word_context_audit_note}")
 
 
 # Content model v2 removes standalone phrase practice. Existing phrase rows are
@@ -3004,6 +2986,27 @@ elif page == "Add":
 elif page == "Library":
     st.subheader("Library")
     st.caption("Retired items stay out of ordinary practice until their sparse long-term review is due.")
+
+    # The ambiguity audit is deliberately manual. Running an AI audit automatically
+    # during app startup can delay or block the Streamlit page from opening.
+    try:
+        audit_version = int(get_setting("word_context_audit_version", 0))
+    except Exception:
+        audit_version = 0
+    if audit_version < 1:
+        if st.button("Fix ambiguous English word cues", key="run_word_context_audit"):
+            try:
+                with st.spinner("Checking existing word cards for ambiguous English cues…"):
+                    run_word_context_audit_once()
+                result = st.session_state.get("word_context_audit_result", {})
+                st.success(
+                    f"Checked {result.get('checked', 0)} word cards and added clearer English context "
+                    f"to {result.get('fixed', 0)} ambiguous card(s)."
+                )
+            except Exception as exc:
+                st.error(f"Could not run the word-context audit: {exc}")
+    else:
+        st.caption("Ambiguous English word cues have already been audited.")
     try:
         items = [
             item for item in fetch_items(include_inactive=True)
