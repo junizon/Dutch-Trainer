@@ -450,6 +450,10 @@ def practice_english_cue(dutch: str, english: str) -> str:
     # distinguish them without simply revealing the Dutch answer.
     if re.search(r"\bagenda\b", nl_norm) and re.search(r"\bschedule\b", en, flags=re.IGNORECASE):
         en = re.sub(r"\bschedule\b", "calendar", en, count=1, flags=re.IGNORECASE)
+    elif re.search(r"\bplanning\b", nl_norm) and re.search(r"\bschedule\b", en, flags=re.IGNORECASE):
+        # English “schedule” can also point to Dutch agenda. When the intended
+        # answer is planning, “plan” gives the learner the needed distinction.
+        en = re.sub(r"\bschedule\b", "plan", en, count=1, flags=re.IGNORECASE)
 
     # 'Even' is often pragmatically natural in Dutch but omitted in a literal English
     # translation. For a typing drill that makes the expected word impossible to infer,
@@ -1551,6 +1555,142 @@ def run_word_context_audit_once() -> None:
     result = audit_and_fix_word_contexts()
     set_setting("word_context_audit_version", 1)
     st.session_state.word_context_audit_result = result
+
+
+def audit_and_fix_sentence_cues(batch_size: int = 24) -> dict[str, int]:
+    """Audit existing ordinary sentence cues for wording that cannot predict the Dutch answer.
+
+    This is deliberately broader than the small deterministic display fixes for agenda/planning,
+    even and nog. It reviews already-saved sentence cards and rewrites only the English cue when
+    the current cue loses a distinction the learner is expected to type in Dutch.
+    """
+    if not OPENAI_KEY or OpenAI is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    sentences = [
+        dict(item) for item in fetch_items(include_inactive=True)
+        if str(item.get("item_type", "")) == "sentence" and not is_verb_item(item)
+    ]
+    if not sentences:
+        return {"checked": 0, "fixed": 0}
+
+    client = OpenAI(api_key=OPENAI_KEY)
+    fixed = 0
+    checked = 0
+    schema = {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_id": {"type": "string"},
+                        "needs_rewrite": {"type": "boolean"},
+                        "english": {"type": "string"},
+                    },
+                    "required": ["item_id", "needs_rewrite", "english"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+
+    size = max(1, int(batch_size))
+    for start in range(0, len(sentences), size):
+        batch = sentences[start:start + size]
+        payload = [
+            {
+                "item_id": str(item.get("id")),
+                "dutch_answer": str(item.get("dutch", "")),
+                "english_cue": str(item.get("english", "")),
+                "level": str(item.get("level", "")),
+                "theme": str(item.get("theme", "")),
+            }
+            for item in batch
+        ]
+        prompt = f"""
+Audit these EXISTING Dutch sentence-practice cards.
+The learner sees ONLY the English cue and must type the complete intended Dutch sentence.
+
+Cards (JSON):
+{json.dumps(payload, ensure_ascii=False)}
+
+For EVERY card, return exactly one result with the same item_id.
+Set needs_rewrite=true only when the current English cue does not give enough information to
+predict a meaningful word or distinction that the Dutch answer requires, or when it naturally
+points to another common Dutch wording that would also be a reasonable translation.
+
+Typical problems include, but are not limited to:
+- Dutch de agenda versus de planning both being cued simply as “schedule”. Use calendar/diary
+  for agenda and plan/planning/work plan where appropriate for planning.
+- required even being invisible in English. Preserve it naturally with just, briefly, for a moment,
+  etc., depending on context.
+- required nog being invisible. Preserve the intended sense naturally with still, yet, another,
+  more, again, etc., depending on context.
+- other short Dutch words or lexical choices that change meaning but have disappeared from the cue.
+
+Do NOT rewrite merely because another Dutch translation exists in theory. Only fix a real practice
+ambiguity where the learner could not reasonably know what wording this card expects.
+
+When needs_rewrite=true:
+- Write a short, natural English cue that preserves the intended meaning closely enough to signal
+  the required Dutch wording.
+- Do not put Dutch words in parentheses or otherwise reveal the answer.
+- Keep the original meaning, person, tense, polarity and level.
+- Prefer normal English over artificial dictionary-style hints.
+
+When needs_rewrite=false, return the current English cue unchanged in english.
+""".strip()
+
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt,
+            store=False,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "sentence_cue_audit",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        )
+        data = json.loads(response.output_text)
+        by_id = {str(item.get("id")): item for item in batch}
+        seen: set[str] = set()
+        for result in data.get("results", []):
+            item_id = str(result.get("item_id", ""))
+            if item_id not in by_id or item_id in seen:
+                continue
+            seen.add(item_id)
+            checked += 1
+            if not bool(result.get("needs_rewrite")):
+                continue
+            revised = str(result.get("english", "") or "").strip()
+            current = str(by_id[item_id].get("english", "") or "").strip()
+            if not revised or normalize(revised) == normalize(current):
+                continue
+            supa_patch("trainer_items", {"id": f"eq.{item_id}"}, {"english": revised})
+            fixed += 1
+
+    return {"checked": checked, "fixed": fixed}
+
+
+def run_sentence_cue_audit_once() -> None:
+    """Run the saved-sentence cue audit once, only after the user presses the Library button."""
+    try:
+        version = int(get_setting("sentence_cue_audit_version", 0))
+    except Exception:
+        version = 0
+    if version >= 1 or not OPENAI_KEY or OpenAI is None:
+        return
+
+    result = audit_and_fix_sentence_cues()
+    set_setting("sentence_cue_audit_version", 1)
+    st.session_state.sentence_cue_audit_result = result
 
 
 def generate_items(
@@ -3037,6 +3177,27 @@ elif page == "Library":
                 st.error(f"Could not run the word-context audit: {exc}")
     else:
         st.caption("Ambiguous English word cues have already been audited.")
+
+    # Existing sentence cards need a separate pass: older material may contain
+    # ambiguous translations even though newly generated cards now use stricter cues.
+    try:
+        sentence_audit_version = int(get_setting("sentence_cue_audit_version", 0))
+    except Exception:
+        sentence_audit_version = 0
+    if sentence_audit_version < 1:
+        if st.button("Fix ambiguous English sentence cues", key="run_sentence_cue_audit"):
+            try:
+                with st.spinner("Checking existing sentence cards for ambiguous English cues…"):
+                    run_sentence_cue_audit_once()
+                result = st.session_state.get("sentence_cue_audit_result", {})
+                st.success(
+                    f"Checked {result.get('checked', 0)} sentence cards and clarified "
+                    f"{result.get('fixed', 0)} ambiguous cue(s)."
+                )
+            except Exception as exc:
+                st.error(f"Could not run the sentence-cue audit: {exc}")
+    else:
+        st.caption("Ambiguous English sentence cues have already been audited.")
     try:
         items = [
             item for item in fetch_items(include_inactive=True)
