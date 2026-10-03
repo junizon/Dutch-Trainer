@@ -43,6 +43,7 @@ OPENAI_KEY = secret("OPENAI_API_KEY")
 OPENAI_MODEL = secret("OPENAI_MODEL", "gpt-5.6-luna")
 TRAINER_TIMEZONE = secret("TRAINER_TIMEZONE", "Europe/Amsterdam")
 REST_DAYS_ALLOWED = 2  # same forgiving rule as Napraten: up to 2 consecutive rest days
+USAGE_IDLE_CAP_SECONDS = 15 * 60  # allow genuine thinking time before treating a gap as idle
 
 
 def configured() -> bool:
@@ -1159,10 +1160,11 @@ def tick_usage(current_page: str) -> str | None:
     last = float(st.session_state.get("usage_last_tick", now))
     previous_page = st.session_state.get("usage_prev_page")
     delta = max(0.0, now - last)
-    # Count time spent on the Practice screen between interactions, but cap long
-    # idle gaps so an abandoned browser tab does not inflate the total.
+    # Count time spent on the Practice screen between interactions. A learner may
+    # genuinely spend several minutes reading or thinking before touching the app,
+    # so allow a generous study gap while still limiting abandoned-tab inflation.
     if previous_page == "Practice" and delta > 0:
-        st.session_state.usage_session_seconds += min(delta, 300.0)
+        st.session_state.usage_session_seconds += min(delta, float(USAGE_IDLE_CAP_SECONDS))
     st.session_state.usage_last_tick = now
     st.session_state.usage_prev_page = current_page
     return previous_page
