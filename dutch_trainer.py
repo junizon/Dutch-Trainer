@@ -1390,6 +1390,140 @@ def generation_exclusions(namespaces: set[str]) -> tuple[set[str], list[str]]:
 
     return identities, labels
 
+
+def audit_and_fix_word_contexts(batch_size: int = 30) -> dict[str, int]:
+    """One-time AI audit of existing word cues for ambiguity.
+
+    The practice screen can show ``example_en`` under a word cue. This audit looks
+    across both active and retired word cards and fills/replaces that context only
+    when the English gloss is too broad to identify the intended Dutch word (or an
+    existing example is still too weak to do so). It deliberately leaves clear
+    word cards alone so practice does not become unnecessarily verbose.
+    """
+    if not OPENAI_KEY or OpenAI is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    words = [
+        dict(item) for item in fetch_items(include_inactive=True)
+        if str(item.get("item_type", "")) == "word" and not is_verb_item(item)
+    ]
+    if not words:
+        return {"checked": 0, "fixed": 0}
+
+    client = OpenAI(api_key=OPENAI_KEY)
+    fixed = 0
+    checked = 0
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_id": {"type": "string"},
+                        "needs_context": {"type": "boolean"},
+                        "example_en": {"type": "string"},
+                    },
+                    "required": ["item_id", "needs_context", "example_en"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+
+    for start in range(0, len(words), max(1, int(batch_size))):
+        batch = words[start:start + max(1, int(batch_size))]
+        payload = [
+            {
+                "item_id": str(item.get("id")),
+                "dutch_answer": str(item.get("dutch", "")),
+                "english_cue": str(item.get("english", "")),
+                "current_example_en": str(item.get("example_en", "") or ""),
+                "level": str(item.get("level", "")),
+                "theme": str(item.get("theme", "")),
+            }
+            for item in batch
+        ]
+        prompt = f"""
+Audit these EXISTING Dutch vocabulary cards for an English-cue ambiguity problem.
+The learner sees the English cue and must type the exact intended Dutch answer.
+A short English example sentence can be shown under the cue as disambiguating context.
+
+Cards (JSON):
+{json.dumps(payload, ensure_ascii=False)}
+
+For EVERY card return exactly one result with the same item_id.
+Set needs_context=true ONLY when the English cue by itself could reasonably point to
+multiple common Dutch words/meanings, OR when the current English example is missing
+or too weak to distinguish the intended Dutch answer in such an ambiguous case.
+Examples of the problem: "the transfer", "the change", "the appointment", "the issue",
+or English phrasal verbs with several ordinary Dutch equivalents.
+
+When needs_context=true:
+- Write one SHORT, natural English sentence that clearly selects the intended meaning.
+- Do not include Dutch words or translations in the sentence.
+- Do not make the sentence a dictionary definition; make it sound like normal usage.
+- Keep it generally under 12 words where practical.
+- Use the Dutch answer only to determine the intended sense.
+
+When needs_context=false, return an empty string for example_en.
+Do NOT rewrite the English cue, Dutch answer, level, or theme.
+""".strip()
+
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt,
+            store=False,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "word_context_audit",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        )
+        data = json.loads(response.output_text)
+        by_id = {str(item.get("id")): item for item in batch}
+        seen_ids: set[str] = set()
+        for result in data.get("results", []):
+            item_id = str(result.get("item_id", ""))
+            if item_id not in by_id or item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            checked += 1
+            if not bool(result.get("needs_context")):
+                continue
+            example_en = str(result.get("example_en", "") or "").strip()
+            if not example_en:
+                continue
+            current = str(by_id[item_id].get("example_en", "") or "").strip()
+            if normalize(current) == normalize(example_en):
+                continue
+            supa_patch("trainer_items", {"id": f"eq.{item_id}"}, {"example_en": example_en})
+            fixed += 1
+
+    return {"checked": checked, "fixed": fixed}
+
+
+def run_word_context_audit_once() -> None:
+    """Run the ambiguity cleanup once per trainer database, after explicit user approval."""
+    try:
+        version = int(get_setting("word_context_audit_version", 0))
+    except Exception:
+        version = 0
+    if version >= 1 or not OPENAI_KEY or OpenAI is None:
+        return
+
+    result = audit_and_fix_word_contexts()
+    set_setting("word_context_audit_version", 1)
+    st.session_state.word_context_audit_result = result
+
+
 def generate_items(
     level: str,
     topic: str,
@@ -1460,10 +1594,11 @@ Requirements:
 - Keep the vocabulary appropriate to CEFR {level}. At B1/B2, short must NOT mean childish or A1-basic; use compact but genuinely useful intermediate language.
 - Avoid textbook-sounding filler, artificial examples, rare idioms, and trivial variations of the same sentence.
 - English must be a concise natural cue suitable for a typing exercise.
+- For EVERY word item, example_en must be a short, natural English sentence that makes the intended meaning/context clear without revealing the Dutch answer. This context sentence is shown during practice specifically to disambiguate broad English glosses such as "transfer", "change", "appointment", etc.
 - The English cue must make the REQUIRED Dutch wording inferable. Do not use the same vague English cue for distinct Dutch choices. In particular, distinguish Dutch "de agenda" (calendar/diary) from "de planning" (schedule/plan) instead of translating both simply as "schedule".
 - If the Dutch sentence requires the pragmatic particle "even", the English cue must signal it naturally where possible (for example with "just", "briefly", or "for a moment"); do not silently omit it from the cue.
 - Do not generate Chinese translations.
-- example_nl/example_en are optional in spirit but must be strings; for a sentence item, they may repeat the sentence/meaning.
+- For word items, example_en is REQUIRED and must provide useful disambiguating context; example_nl may be a natural Dutch example. For sentence items, example_nl/example_en may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
 - Avoid duplicates, trivial variants, and inflection-only repeats of excluded material.
 - Do not include pronunciation respellings.
@@ -1872,6 +2007,7 @@ def apply_app_css(scale: float) -> None:
           .cue-card {{ background:#fff; border:1px solid #dfcfb2; border-radius:10px; padding:9px 16px; margin:6px 0 7px; box-shadow:0 3px 10px rgba(75,53,31,.05); text-align:center; }}
           .cue-kicker {{ color:#71583d; letter-spacing:.13em; font-size:{0.64 * scale:.3f}rem; font-weight:700; }}
           .cue-text {{ color:#2d2118; font-family:"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif; font-size:{1.38 * scale:.3f}rem; line-height:1.18; font-weight:500; letter-spacing:-.008em; margin:0; overflow-wrap:anywhere; }}
+          .cue-example {{ color:#715f4c; font-size:{0.82 * scale:.3f}rem; line-height:1.35; margin-top:7px; font-style:italic; overflow-wrap:anywhere; }}
           .stage-line {{ color:#62503e; font-size:{0.80 * scale:.3f}rem; letter-spacing:.04em; margin:.3rem 0 .25rem; }}
           .compact-stats {{ color:#62503e; text-align:center; font-size:{0.76 * scale:.3f}rem; margin-top:5px; }}
           .sync-line {{ color:#695642; text-align:center; font-size:{0.70 * scale:.3f}rem; margin-top:1px; }}
@@ -2255,6 +2391,15 @@ if not st.session_state.get("scheduler_migration_v3_checked"):
         st.session_state.scheduler_migration_note = str(exc)
     st.session_state.scheduler_migration_v3_checked = True
 
+# One-time cleanup of existing vocabulary cards whose English gloss is too broad
+# to identify the intended Dutch answer. The user explicitly approved this audit.
+if not st.session_state.get("word_context_audit_checked"):
+    try:
+        run_word_context_audit_once()
+    except Exception as exc:
+        st.session_state.word_context_audit_note = str(exc)
+    st.session_state.word_context_audit_checked = True
+
 current_scale = font_scale()
 apply_app_css(current_scale)
 
@@ -2304,6 +2449,15 @@ render_activity_banner()
 
 if st.session_state.get("scheduler_migration_note"):
     st.caption(f"Learning-schedule migration skipped: {st.session_state.scheduler_migration_note}")
+
+if st.session_state.get("word_context_audit_result"):
+    audit_result = st.session_state.word_context_audit_result
+    st.success(
+        f"Word-context audit complete: checked {audit_result.get('checked', 0)} word cards and "
+        f"added clearer English context to {audit_result.get('fixed', 0)} ambiguous card(s)."
+    )
+if st.session_state.get("word_context_audit_note"):
+    st.caption(f"Word-context audit will retry later: {st.session_state.word_context_audit_note}")
 
 
 # Content model v2 removes standalone phrase practice. Existing phrase rows are
@@ -2444,8 +2598,18 @@ if page == "Practice":
             f'{html.escape(str(item.get("level", "")))} · {html.escape(stage)} · {idx + 1}/{len(queue)}</div>',
             unsafe_allow_html=True,
         )
+        # Single-word English glosses can be ambiguous (for example "transfer").
+        # Show the saved English example as context, without exposing any Dutch.
+        cue_example = ""
+        if (not is_verb_item(item)) and str(item.get("item_type", "")) == "word":
+            cue_example = str(item.get("example_en", "") or "").strip()
+        example_html = (
+            f'<div class="cue-example">Example: {html.escape(cue_example)}</div>'
+            if cue_example and normalize(cue_example) != normalize(cue)
+            else ""
+        )
         st.markdown(
-            f'<div class="cue-card"><div class="cue-text">{html.escape(cue)}</div></div>',
+            f'<div class="cue-card"><div class="cue-text">{html.escape(cue)}</div>{example_html}</div>',
             unsafe_allow_html=True,
         )
 
