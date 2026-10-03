@@ -472,6 +472,35 @@ def practice_english_cue(dutch: str, english: str) -> str:
         else:
             en = f"{en} (just / briefly)"
 
+    # Dutch 'nog' is also frequently lost in a natural English translation.
+    # In time-limited expressions such as 'vandaag nog', 'deze week nog', etc.,
+    # English 'still' gives the learner the missing signal without revealing Dutch.
+    if re.search(r"\bnog\b", nl_norm) and not re.search(
+        r"\b(still|yet|another|more|again|left|remaining)\b", en, flags=re.IGNORECASE
+    ):
+        time_limited_nog = re.search(
+            r"\b(?:vandaag|morgen|vanavond|vannacht|deze\s+week|deze\s+maand|dit\s+jaar|nu)\s+nog\b",
+            nl_norm,
+        )
+        if time_limited_nog:
+            patterns = [
+                (r"^(Can|Could|Would|Will|Should)\s+(you|we|I|he|she|they)\b", r"\1 \2 still"),
+                (r"^(I|You|We|They)\s+(can|could|will|would|should)\b", r"\1 \2 still"),
+                (r"^(He|She)\s+(can|could|will|would|should)\b", r"\1 \2 still"),
+            ]
+            for pattern, replacement in patterns:
+                changed = re.sub(pattern, replacement, en, count=1, flags=re.IGNORECASE)
+                if changed != en:
+                    en = changed
+                    break
+            else:
+                en = f"{en} (still)"
+        else:
+            # Other uses of 'nog' can mean still/yet/another/more. If the saved
+            # English translation lost that distinction entirely, show a small cue
+            # rather than guessing the exact sense incorrectly.
+            en = f"{en} (nog: still / yet / another)"
+
     return en
 
 
@@ -1597,6 +1626,7 @@ Requirements:
 - For EVERY word item, example_en must be a short, natural English sentence that makes the intended meaning/context clear without revealing the Dutch answer. This context sentence is shown during practice specifically to disambiguate broad English glosses such as "transfer", "change", "appointment", etc.
 - The English cue must make the REQUIRED Dutch wording inferable. Do not use the same vague English cue for distinct Dutch choices. In particular, distinguish Dutch "de agenda" (calendar/diary) from "de planning" (schedule/plan) instead of translating both simply as "schedule".
 - If the Dutch sentence requires the pragmatic particle "even", the English cue must signal it naturally where possible (for example with "just", "briefly", or "for a moment"); do not silently omit it from the cue.
+- If the Dutch sentence requires "nog", the English cue must also preserve that meaning naturally (for example "still", "yet", "another", or "more", depending on context). Time-limited expressions such as "vandaag nog" should normally be cued with "still ... today" or an equally clear equivalent.
 - Do not generate Chinese translations.
 - For word items, example_en is REQUIRED and must provide useful disambiguating context; example_nl may be a natural Dutch example. For sentence items, example_nl/example_en may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
@@ -1743,7 +1773,7 @@ For EACH verb:
 - Keep sentences practical and generally 3-9 words, but let B1/B2 sentences contain the
   prepositions, particles and complements needed to show how the verb is actually used.
 - The English sentence is the cue; the learner must type the complete Dutch sentence.
-- The cue must make required Dutch wording inferable. Distinguish "de agenda" (calendar/diary) from "de planning" (schedule/plan), and if the Dutch sentence requires "even", signal that naturally in English (for example "just", "briefly", or "for a moment").
+- The cue must make required Dutch wording inferable. Distinguish "de agenda" (calendar/diary) from "de planning" (schedule/plan). If the Dutch sentence requires "even", signal that naturally in English (for example "just", "briefly", or "for a moment"). If it requires "nog", preserve that meaning too (for example "still", "yet", "another", or "more", depending on context).
 - Use contemporary Netherlands Dutch.
 - Include irregular, separable, reflexive and modal verbs when appropriate for the selected level/topic.
 - In perfect tense, use the correct auxiliary and past participle.
