@@ -433,6 +433,47 @@ def highlight_verb_html(sentence: str, verb_parts: Any) -> str:
     )
 
 
+def practice_english_cue(dutch: str, english: str) -> str:
+    """Make the English prompt specific enough to predict the required Dutch wording.
+
+    Some natural English translations collapse distinctions that the learner is
+    expected to type in Dutch. Keep the saved translation intact, but clarify the
+    displayed practice cue for those cases.
+    """
+    nl = str(dutch or "").strip()
+    en = str(english or "").strip()
+    nl_norm = normalize(nl)
+
+    # Dutch agenda is normally a diary/calendar, while planning is the schedule/plan.
+    # If both were generated from the vague English cue "schedule", make the cue
+    # distinguish them without simply revealing the Dutch answer.
+    if re.search(r"\bagenda\b", nl_norm) and re.search(r"\bschedule\b", en, flags=re.IGNORECASE):
+        en = re.sub(r"\bschedule\b", "calendar", en, count=1, flags=re.IGNORECASE)
+
+    # 'Even' is often pragmatically natural in Dutch but omitted in a literal English
+    # translation. For a typing drill that makes the expected word impossible to infer,
+    # so add a natural 'just' cue where we can do so safely.
+    if re.search(r"\beven\b", nl_norm) and not re.search(
+        r"\b(just|briefly|quickly|moment|sec(?:ond)?)\b", en, flags=re.IGNORECASE
+    ):
+        patterns = [
+            (r"^(I'll|I'd|I've|I'm|I can|I could|I will|I would|I have|I am)\b", r"\1 just"),
+            (r"^(Can you|Could you|Would you|Will you)\b", r"\1 just"),
+            (r"^(Let me|Let us|Let's)\b", r"\1 just"),
+            (r"^(We can|We could|We will|We'll|We should|We have|We've)\b", r"\1 just"),
+            (r"^(I|We)\b", r"\1 just"),
+        ]
+        for pattern, replacement in patterns:
+            changed = re.sub(pattern, replacement, en, count=1, flags=re.IGNORECASE)
+            if changed != en:
+                en = changed
+                break
+        else:
+            en = f"{en} (just / briefly)"
+
+    return en
+
+
 def answer_variants(item: dict[str, Any]) -> list[str]:
     vals = [item.get("dutch", "")]
     extra = item.get("accepted_answers") or []
@@ -1417,6 +1458,8 @@ Requirements:
 - Keep the vocabulary appropriate to CEFR {level}. At B1/B2, short must NOT mean childish or A1-basic; use compact but genuinely useful intermediate language.
 - Avoid textbook-sounding filler, artificial examples, rare idioms, and trivial variations of the same sentence.
 - English must be a concise natural cue suitable for a typing exercise.
+- The English cue must make the REQUIRED Dutch wording inferable. Do not use the same vague English cue for distinct Dutch choices. In particular, distinguish Dutch "de agenda" (calendar/diary) from "de planning" (schedule/plan) instead of translating both simply as "schedule".
+- If the Dutch sentence requires the pragmatic particle "even", the English cue must signal it naturally where possible (for example with "just", "briefly", or "for a moment"); do not silently omit it from the cue.
 - Do not generate Chinese translations.
 - example_nl/example_en are optional in spirit but must be strings; for a sentence item, they may repeat the sentence/meaning.
 - accepted_answers should contain only genuinely equivalent Dutch variants, not looser paraphrases.
@@ -1563,6 +1606,7 @@ For EACH verb:
 - Keep sentences practical and generally 3-9 words, but let B1/B2 sentences contain the
   prepositions, particles and complements needed to show how the verb is actually used.
 - The English sentence is the cue; the learner must type the complete Dutch sentence.
+- The cue must make required Dutch wording inferable. Distinguish "de agenda" (calendar/diary) from "de planning" (schedule/plan), and if the Dutch sentence requires "even", signal that naturally in English (for example "just", "briefly", or "for a moment").
 - Use contemporary Netherlands Dutch.
 - Include irregular, separable, reflexive and modal verbs when appropriate for the selected level/topic.
 - In perfect tense, use the correct auxiliary and past participle.
@@ -2373,13 +2417,13 @@ if page == "Practice":
         item_progress = dict(item.get("_progress") or _default_progress(str(item["id"])))
         verb_exercise = pick_verb_exercise(item, verb_tense) if is_verb_item(item) else None
         if verb_exercise:
-            cue = str(verb_exercise.get("english", ""))
             correct_answer = str(verb_exercise.get("dutch", ""))
+            cue = practice_english_cue(correct_answer, str(verb_exercise.get("english", "")))
             accepted_answers = verb_exercise.get("accepted_answers") or []
             verb_label = f"VERB · {str(item.get('dutch',''))} · {str(verb_exercise.get('tense','')).upper()}"
         else:
-            cue = str(item.get("english", ""))
             correct_answer = str(item.get("dutch", ""))
+            cue = practice_english_cue(correct_answer, str(item.get("english", "")))
             accepted_answers = item.get("accepted_answers") or []
             verb_label = str(item.get("item_type", "item")).upper()
 
